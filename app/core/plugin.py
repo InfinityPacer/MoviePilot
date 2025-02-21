@@ -9,6 +9,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 
+from app.helper.sites import SitesHelper
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 
@@ -19,7 +20,6 @@ from app.db.plugindata_oper import PluginDataOper
 from app.db.systemconfig_oper import SystemConfigOper
 from app.helper.module import ModuleHelper
 from app.helper.plugin import PluginHelper
-from app.helper.sites import SitesHelper
 from app.log import logger
 from app.schemas.types import EventType, SystemConfigKey
 from app.utils.crypto import RSAUtils
@@ -91,8 +91,8 @@ class PluginManager(metaclass=Singleton):
     _plugins: dict = {}
     # 运行态插件列表
     _running_plugins: dict = {}
-    # 配置Key
-    _config_key: str = "plugin.%s"
+    # 多实例插件列表
+    _running_plugin_instances: dict = {}
     # 监听器
     _observer: Observer = None
 
@@ -111,10 +111,11 @@ class PluginManager(metaclass=Singleton):
         # 启动插件
         self.start()
 
-    def start(self, pid: str = None):
+    def start(self, pid: Optional[str] = None, instance_id: Optional[str] = None):
         """
         启动加载插件
         :param pid: 插件ID，为空加载所有插件
+        :param instance_id: 实例ID，为空加载所有实例
         """
 
         def check_module(module: Any):
@@ -140,6 +141,8 @@ class PluginManager(metaclass=Singleton):
             )
         # 已安装插件
         installed_plugins = self.systemconfig.get(SystemConfigKey.UserInstalledPlugins) or []
+        # 插件分身
+        clone_plugins = self.systemconfig.get(SystemConfigKey.UserPluginClones) or {}
         # 排序
         plugins.sort(key=lambda x: x.plugin_order if hasattr(x, "plugin_order") else 0)
         for plugin in plugins:
@@ -160,28 +163,32 @@ class PluginManager(metaclass=Singleton):
                     # 设置事件状态为不可用
                     eventmanager.disable_event_handler(plugin)
                     continue
-                # 生成实例
-                plugin_obj = plugin()
-                # 生效插件配置
-                plugin_obj.init_plugin(self.get_plugin_config(plugin_id))
-                # 存储运行实例
-                self._running_plugins[plugin_id] = plugin_obj
-                logger.info(f"加载插件：{plugin_id} 版本：{plugin_obj.plugin_version}")
-                # 启用的插件才设置事件注册状态可用
-                if plugin_obj.get_state():
-                    eventmanager.enable_event_handler(plugin)
-                else:
-                    eventmanager.disable_event_handler(plugin)
+                # 获取插件分身
+                clones = clone_plugins.get(plugin_id) or {"default"}
+                for clone_id in clones:
+                    # 生成实例
+                    plugin_obj = plugin()
+                    # 生效插件配置
+                    plugin_obj.init_plugin(self.get_plugin_config(plugin_id, clone_id), clone_id)
+                    # 存储运行实例
+                    self._running_plugins[self.get_plugin_id(plugin_id, clone_id)] = plugin_obj
+                    logger.info(f"加载插件：{plugin_id} 版本：{plugin_obj.plugin_version} 实例：{clone_id}")
+                    # 启用的插件才设置事件注册状态可用
+                    if plugin_obj.get_state():
+                        eventmanager.enable_event_handler(plugin)
+                    else:
+                        eventmanager.disable_event_handler(plugin)
             except Exception as err:
                 logger.error(f"加载插件 {plugin_id} 出错：{str(err)} - {traceback.format_exc()}")
 
-    def init_plugin(self, plugin_id: str, conf: dict):
+    def init_plugin(self, plugin_id: str, conf: dict, instance_id: Optional[str] = None):
         """
         初始化插件
         :param plugin_id: 插件ID
         :param conf: 插件配置
+        :param instance_id: 实例ID
         """
-        plugin = self._running_plugins.get(plugin_id)
+        plugin = self._running_plugins.get(self.get_plugin_id(plugin_id, instance_id))
         if not plugin:
             return
         # 初始化插件
@@ -194,10 +201,11 @@ class PluginManager(metaclass=Singleton):
             # 禁用插件类的事件处理器
             eventmanager.disable_event_handler(type(plugin))
 
-    def stop(self, pid: str = None):
+    def stop(self, pid: Optional[str] = None, instance_id: Optional[str] = None):
         """
         停止插件服务
         :param pid: 插件ID，为空停止所有插件
+        :param instance_id: 实例ID，为空停止所有实例
         """
         # 停止插件
         if pid:
@@ -205,7 +213,7 @@ class PluginManager(metaclass=Singleton):
         else:
             logger.info("正在停止所有插件...")
         for plugin_id, plugin in self._running_plugins.items():
-            if pid and plugin_id != pid:
+            if pid and self.get_plugin_id(pid, instance_id) != plugin_id:
                 continue
             eventmanager.disable_event_handler(type(plugin))
             self.__stop_plugin(plugin)
@@ -365,53 +373,62 @@ class PluginManager(metaclass=Singleton):
             logger.warning(f"存在缺失依赖项安装失败，请尝试手动安装，总耗时：{total_elapsed_time:.2f} 秒")
         return missing_dependencies
 
-    def get_plugin_config(self, pid: str) -> dict:
+    def get_plugin_config(self, pid: str, instance_id: Optional[str] = None) -> dict:
         """
         获取插件配置
         :param pid: 插件ID
+        :param instance_id: 实例ID
         """
         if not self._plugins.get(pid):
             return {}
-        conf = self.systemconfig.get(self._config_key % pid)
+        plugin_config_key = self.get_plugin_id(plugin_id=pid, instance_id=instance_id)
+        conf = self.systemconfig.get(plugin_config_key)
         if conf:
             # 去掉空Key
             return {k: v for k, v in conf.items() if k}
         return {}
 
-    def save_plugin_config(self, pid: str, conf: dict) -> bool:
+    def save_plugin_config(self, pid: str, conf: dict, instance_id: Optional[str] = None) -> bool:
         """
         保存插件配置
         :param pid: 插件ID
         :param conf: 配置
+        :param instance_id: 实例ID
         """
         if not self._plugins.get(pid):
             return False
-        return self.systemconfig.set(self._config_key % pid, conf)
+        plugin_config_key = self.get_plugin_id(plugin_id=pid, instance_id=instance_id)
+        return self.systemconfig.set(plugin_config_key, conf)
 
-    def delete_plugin_config(self, pid: str) -> bool:
+    def delete_plugin_config(self, pid: str, instance_id: Optional[str] = None) -> bool:
         """
         删除插件配置
         :param pid: 插件ID
+        :param instance_id: 实例ID
         """
         if not self._plugins.get(pid):
             return False
-        return self.systemconfig.delete(self._config_key % pid)
+        plugin_id = self.get_plugin_id(plugin_id=pid, instance_id=instance_id)
+        return self.systemconfig.delete(plugin_id)
 
-    def delete_plugin_data(self, pid: str) -> bool:
+    def delete_plugin_data(self, pid: str, instance_id: Optional[str] = None) -> bool:
         """
         删除插件数据
         :param pid: 插件ID
+        :param instance_id: 实例ID
         """
         if not self._plugins.get(pid):
             return False
-        self.plugindata.del_data(pid)
+        self.plugindata.del_data(pid, instance_id)
         return True
 
-    def get_plugin_form(self, pid: str) -> Tuple[List[dict], Dict[str, Any]]:
+    def get_plugin_form(self, pid: str, instance_id: Optional[str] = None) -> Tuple[List[dict], Dict[str, Any]]:
         """
         获取插件表单
         :param pid: 插件ID
+        :param instance_id: 实例ID
         """
+        plugin_id = self.get_plugin_id(plugin_id=pid, instance_id=instance_id)
         plugin = self._running_plugins.get(pid)
         if not plugin:
             return [], {}
@@ -419,11 +436,13 @@ class PluginManager(metaclass=Singleton):
             return plugin.get_form() or ([], {})
         return [], {}
 
-    def get_plugin_page(self, pid: str) -> List[dict]:
+    def get_plugin_page(self, pid: str, instance_id: Optional[str] = None) -> List[dict]:
         """
         获取插件页面
         :param pid: 插件ID
+        :param instance_id: 实例ID
         """
+        plugin_id = self.get_plugin_id(plugin_id=pid, instance_id=instance_id)
         plugin = self._running_plugins.get(pid)
         if not plugin:
             return []
@@ -431,11 +450,13 @@ class PluginManager(metaclass=Singleton):
             return plugin.get_page() or []
         return []
 
-    def get_plugin_dashboard(self, pid: str, key: str = None, **kwargs) -> Optional[schemas.PluginDashboard]:
+    def get_plugin_dashboard(self, pid: str, key: str = None, instance_id: Optional[str] = None, **kwargs) \
+            -> Optional[schemas.PluginDashboard]:
         """
         获取插件仪表盘
         :param pid: 插件ID
         :param key: 仪表盘key
+        :param instance_id: 实例ID
         """
 
         def __get_params_count(func: Callable):
@@ -445,6 +466,7 @@ class PluginManager(metaclass=Singleton):
             signature = inspect.signature(func)
             return len(signature.parameters)
 
+        plugin_id = self.get_plugin_id(plugin_id=pid, instance_id=instance_id)
         plugin = self._running_plugins.get(pid)
         if not plugin:
             return None
@@ -469,11 +491,13 @@ class PluginManager(metaclass=Singleton):
                 )
         return None
 
-    def get_plugin_state(self, pid: str) -> bool:
+    def get_plugin_state(self, pid: str, instance_id: Optional[str] = None) -> bool:
         """
         获取插件状态
         :param pid: 插件ID
+        :param instance_id: 实例ID
         """
+        plugin_id = self.get_plugin_id(plugin_id=pid, instance_id=instance_id)
         plugin = self._running_plugins.get(pid)
         return plugin.get_state() if plugin else False
 
@@ -532,7 +556,7 @@ class PluginManager(metaclass=Singleton):
                     logger.error(f"获取插件 {plugin_id} API出错：{str(e)}")
         return ret_apis
 
-    def get_plugin_services(self, pid: Optional[str] = None) -> List[Dict[str, Any]]:
+    def get_plugin_services(self, pid: Optional[str] = None, instance_id: Optional[str] = None) -> List[Dict[str, Any]]:
         """
         获取插件服务
         [{
@@ -760,6 +784,17 @@ class PluginManager(metaclass=Singleton):
         # 根据加载排序重新排序
         plugins.sort(key=lambda x: x.plugin_order if hasattr(x, "plugin_order") else 0)
         return plugins
+
+    @staticmethod
+    def get_plugin_id(plugin_id: str, instance_id: Optional[str] = None) -> Optional[str]:
+        """
+        获取插件标识
+        :param plugin_id: 插件ID
+        :param instance_id: 实例ID
+        """
+        if not instance_id or instance_id == "default":
+            return plugin_id
+        return f"plugin.{plugin_id}.{instance_id}"
 
     @staticmethod
     def is_plugin_exists(pid: str) -> bool:

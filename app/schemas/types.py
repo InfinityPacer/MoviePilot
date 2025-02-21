@@ -135,6 +135,8 @@ class SystemConfigKey(Enum):
     UserCustomCSS = "UserCustomCSS"
     # 用户已安装的插件
     UserInstalledPlugins = "UserInstalledPlugins"
+    # 用户插件分身
+    UserPluginClones = "UserPluginClones"
     # 插件安装统计
     PluginInstallReport = "PluginInstallReport"
     # 默认电影订阅规则
