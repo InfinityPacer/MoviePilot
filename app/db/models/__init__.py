@@ -14,3 +14,6 @@ from .transferhistory import TransferHistory
 from .user import User
 from .userconfig import UserConfig
 from .workflow import Workflow
+from .wrappeddailyfact import WrappedDailyFact
+from .wrappedcatalogsnapshot import WrappedCatalogSnapshot
+from .wrappedbuildstate import WrappedBuildState

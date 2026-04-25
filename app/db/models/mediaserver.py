@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Column, Integer, String, JSON
+from sqlalchemy import Boolean, Column, Integer, String, JSON
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
@@ -36,6 +36,20 @@ class MediaServerItem(Base):
     tvdbid = Column(String, index=True)
     # 路径
     path = Column(String)
+    # 类型标签，用于 Wrapped 媒体库画像
+    genres = Column(JSON, default=list)
+    # 国家/地区标签，用于 Wrapped 媒体库画像
+    countries = Column(JSON, default=list)
+    # 分辨率分桶，用于 Wrapped 构成分析
+    resolution_bucket = Column(String)
+    # 动态范围，用于 Wrapped HDR/SDR 构成分析
+    dynamic_range = Column(String)
+    # 是否包含字幕轨
+    has_subtitles = Column(Boolean)
+    # 字幕轨数量
+    subtitle_stream_count = Column(Integer)
+    # 音频轨数量
+    audio_stream_count = Column(Integer)
     # 季集
     seasoninfo = Column(JSON, default=dict)
     # 备注

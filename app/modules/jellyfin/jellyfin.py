@@ -707,6 +707,12 @@ class Jellyfin:
         格式化item
         """
         try:
+            media_streams = []
+            for source in item.get("MediaSources") or []:
+                media_streams.extend(source.get("MediaStreams") or [])
+            video_stream = next((stream for stream in media_streams if stream.get("Type") == "Video"), {})
+            subtitle_stream_count = len([stream for stream in media_streams if stream.get("Type") == "Subtitle"])
+            audio_stream_count = len([stream for stream in media_streams if stream.get("Type") == "Audio"])
             user_data = item.get("UserData", {})
             if not user_data:
                 user_state = None
@@ -737,6 +743,13 @@ class Jellyfin:
                 imdbid=item.get("ProviderIds", {}).get("Imdb"),
                 tvdbid=item.get("ProviderIds", {}).get("Tvdb"),
                 path=item.get("Path"),
+                genres=item.get("Genres") or [],
+                countries=item.get("ProductionLocations") or item.get("Countries") or [],
+                resolution_bucket=video_stream.get("Height") or video_stream.get("VideoRange"),
+                dynamic_range=video_stream.get("VideoRange"),
+                has_subtitles=subtitle_stream_count > 0,
+                subtitle_stream_count=subtitle_stream_count,
+                audio_stream_count=audio_stream_count,
                 user_state=user_state
 
             )
@@ -781,7 +794,8 @@ class Jellyfin:
         params = {
             "ParentId": parent,
             "api_key": self._apikey,
-            "Fields": "ProviderIds,OriginalTitle,ProductionYear,Path,UserDataPlayCount,UserDataLastPlayedDate,ParentId",
+            "Fields": "ProviderIds,OriginalTitle,ProductionYear,Path,UserDataPlayCount,UserDataLastPlayedDate,"
+                      "ParentId,Genres,ProductionLocations,MediaSources",
         }
         if limit is not None and limit != -1:
             params.update({

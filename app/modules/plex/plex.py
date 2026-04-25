@@ -492,6 +492,15 @@ class Plex:
         played = getattr(item, "isPlayed", None) or False
         play_count = getattr(item, "viewCount", None) or 0
         last_played_date = getattr(item, "lastViewedAt", None)
+        media_items = getattr(item, "media", []) or []
+        first_media = media_items[0] if media_items else None
+        streams = []
+        for media in media_items:
+            for part in getattr(media, "parts", []) or []:
+                streams.extend(getattr(part, "streams", []) or [])
+        # Wrapped 画像只使用 Plex 已返回的技术字段，缺失时保持空值避免伪造库状态。
+        subtitle_stream_count = len([stream for stream in streams if getattr(stream, "streamType", None) == 3])
+        audio_stream_count = len([stream for stream in streams if getattr(stream, "streamType", None) == 2])
 
         user_state = schemas.MediaServerItemUserState(
             played=played,
@@ -514,6 +523,13 @@ class Plex:
             imdbid=ids.get("imdb_id"),
             tvdbid=ids.get("tvdb_id"),
             path=path,
+            genres=[genre.tag for genre in getattr(item, "genres", []) or [] if getattr(genre, "tag", None)],
+            countries=[country.tag for country in getattr(item, "countries", []) or [] if getattr(country, "tag", None)],
+            resolution_bucket=getattr(first_media, "videoResolution", None) or getattr(first_media, "height", None),
+            dynamic_range=getattr(first_media, "videoDynamicRange", None) or getattr(first_media, "videoProfile", None),
+            has_subtitles=subtitle_stream_count > 0,
+            subtitle_stream_count=subtitle_stream_count,
+            audio_stream_count=audio_stream_count,
             user_state=user_state,
         )
 

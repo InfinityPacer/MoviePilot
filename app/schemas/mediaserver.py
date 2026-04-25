@@ -119,6 +119,20 @@ class MediaServerItem(BaseModel):
     tvdbid: Optional[str] = None
     # 路径
     path: Optional[str] = None
+    # 类型标签，用于 Wrapped 媒体库画像
+    genres: Optional[List[str]] = Field(default_factory=list)
+    # 国家/地区标签，用于 Wrapped 媒体库画像
+    countries: Optional[List[str]] = Field(default_factory=list)
+    # 分辨率分桶，用于 Wrapped 构成分析
+    resolution_bucket: Optional[str] = None
+    # 动态范围，用于 Wrapped HDR/SDR 构成分析
+    dynamic_range: Optional[str] = None
+    # 是否包含字幕轨
+    has_subtitles: Optional[bool] = None
+    # 字幕轨数量
+    subtitle_stream_count: Optional[int] = 0
+    # 音频轨数量
+    audio_stream_count: Optional[int] = 0
     # 季集
     seasoninfo: Optional[Dict[int, list]] = None
     # 备注

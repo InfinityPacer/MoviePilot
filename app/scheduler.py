@@ -20,6 +20,7 @@ from app.chain.recommend import RecommendChain
 from app.chain.site import SiteChain
 from app.chain.subscribe import SubscribeChain
 from app.chain.transfer import TransferChain
+from app.chain.wrapped import WrappedChain
 from app.chain.workflow import WorkflowChain
 from app.core.config import settings, global_vars
 from app.core.event import eventmanager
@@ -153,6 +154,11 @@ class Scheduler(ConfigReloadMixin, metaclass=SingletonClass):
                 "scheduler_job": {
                     "name": "公共定时服务",
                     "func": SchedulerChain().scheduler_job,
+                    "running": False,
+                },
+                "wrapped_daily_rollup": {
+                    "name": "Wrapped 日结",
+                    "func": WrappedChain().daily_rollup,
                     "running": False,
                 },
                 "random_wallpager": {
@@ -333,6 +339,17 @@ class Scheduler(ConfigReloadMixin, metaclass=SingletonClass):
                 name="公共定时服务",
                 minutes=10,
                 kwargs={"job_id": "scheduler_job"},
+            )
+
+            # Wrapped 日结每天凌晨生成一次媒体库快照事实，停机缺口由手动重建兜底。
+            self._scheduler.add_job(
+                self.start,
+                "cron",
+                id="wrapped_daily_rollup",
+                name="Wrapped 日结",
+                hour=3,
+                minute=20,
+                kwargs={"job_id": "wrapped_daily_rollup"},
             )
 
             # 缓存清理服务，每隔24小时
