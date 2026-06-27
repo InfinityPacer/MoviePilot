@@ -4,7 +4,7 @@ import types
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import TestCase
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from app.schemas.types import MediaType
 from app.testing import stub_modules
@@ -868,6 +868,424 @@ class SubscribeChainTest(TestCase):
         self.assertEqual(meta.begin_season, 0)
         self.assertEqual(meta.type, MediaType.TV)
 
+    def test_refresh_progress_from_resolved_missing_normal_uses_no_exists(self):
+        """普通订阅内部进度刷新从主程序已解析缺集结果计算 lack。"""
+        subscribe = self._build_subscribe(best_version=0, total_episode=6, lack_episode=6, start_episode=4)
+        no_exists = {
+            1: {
+                1: SimpleNamespace(
+                    season=1,
+                    episodes=[5, 6],
+                    total_episode=3,
+                    start_episode=4,
+                )
+            }
+        }
+        updates = []
+
+        class _SubscribeOper:
+            """收集订阅进度写入，不接触真实数据库。"""
+
+            def update(self, subscribe_id, payload):
+                updates.append((subscribe_id, payload))
+
+        with patch.object(SUBSCRIBE_CHAIN_MODULE, "SubscribeOper", _SubscribeOper):
+            result = SubscribeChain()._SubscribeChain__refresh_subscribe_progress_from_resolved_missing(
+                subscribe,
+                resolved_no_exists=no_exists,
+                scene="unit",
+            )
+
+        self.assertEqual(result["lack_episode"], 2)
+        self.assertEqual(updates[0][1]["lack_episode"], 2)
+
+    def test_refresh_progress_from_resolved_missing_normal_empty_no_exists_is_zero(self):
+        """普通订阅已解析且无缺集时 lack 为 0。"""
+        subscribe = self._build_subscribe(best_version=0, total_episode=3, lack_episode=3)
+        updates = []
+
+        class _SubscribeOper:
+            """收集订阅进度写入，不接触真实数据库。"""
+
+            def update(self, subscribe_id, payload):
+                updates.append((subscribe_id, payload))
+
+        with patch.object(SUBSCRIBE_CHAIN_MODULE, "SubscribeOper", _SubscribeOper):
+            result = SubscribeChain()._SubscribeChain__refresh_subscribe_progress_from_resolved_missing(
+                subscribe,
+                resolved_no_exists={},
+                scene="unit",
+            )
+
+        self.assertEqual(result["lack_episode"], 0)
+        self.assertEqual(updates[0][1]["lack_episode"], 0)
+
+    def test_compute_lack_episode_rejects_raw_no_exists_from_public_entry(self):
+        """公开 lack 计算入口不接受外部缺集结果，避免绕过主程序解析口径。"""
+        subscribe = self._build_subscribe(best_version=0, total_episode=3, lack_episode=3)
+
+        with self.assertRaises(TypeError):
+            SubscribeChain.compute_lack_episode(subscribe, no_exists={})
+
+    def test_compute_lack_episode_normal_keeps_existing_lack_when_missing_result_is_unknown(self):
+        """普通电视剧订阅缺少已解析缺集结果时保留当前进度，不误算成完成。"""
+        subscribe = self._build_subscribe(best_version=0, total_episode=3, lack_episode=3)
+
+        lack_episode = SubscribeChain.compute_lack_episode(subscribe)
+
+        self.assertEqual(lack_episode, 3)
+
+    def test_compute_lack_episode_wash_counts_only_never_downloaded_targets(self):
+        """洗版 lack 统计从未下载过任意版本的目标集。"""
+        subscribe = self._build_subscribe(
+            best_version=1,
+            best_version_full=0,
+            total_episode=4,
+            lack_episode=4,
+            note=[1],
+            episode_priority={"2": 80, "3": 0},
+        )
+
+        lack_episode = SubscribeChain.compute_lack_episode(subscribe)
+
+        self.assertEqual(lack_episode, 2)
+
+    def test_compute_lack_episode_wash_accepts_total_and_priority_override(self):
+        """total 增长路径可在写库前用临时 episode_priority 计算新 lack。"""
+        subscribe = self._build_subscribe(
+            best_version=1,
+            best_version_full=0,
+            total_episode=3,
+            lack_episode=0,
+            note=[],
+            episode_priority={"1": 100, "2": 100, "3": 100},
+        )
+
+        lack_episode = SubscribeChain.compute_lack_episode(
+            subscribe,
+            total_episode=5,
+            episode_priority={"1": 100, "2": 100, "3": 100, "4": 0, "5": 0},
+        )
+
+        self.assertEqual(lack_episode, 2)
+
+    def test_compute_lack_episode_wash_ignores_current_priority_fallback(self):
+        """洗版 lack 只能用真实 note/episode_priority，不能把 current_priority 当作已下载事实。"""
+        subscribe = self._build_subscribe(
+            best_version=1,
+            best_version_full=0,
+            total_episode=3,
+            lack_episode=3,
+            note=[],
+            episode_priority=None,
+            current_priority=80,
+        )
+
+        lack_episode = SubscribeChain.compute_lack_episode(subscribe)
+
+        self.assertEqual(lack_episode, 3)
+
+    def test_refresh_subscribe_progress_updates_normal_lack_without_finishing_or_events(self):
+        """进度刷新只回写缺集进度，不完成订阅也不发订阅修改事件。"""
+        subscribe = self._build_subscribe(best_version=0, total_episode=3, lack_episode=3, note=[1])
+        meta = SimpleNamespace(type=MediaType.TV, begin_season=1, season=1)
+        mediainfo = SimpleNamespace(type=MediaType.TV, seasons={1: [1, 2, 3]}, title_year="Test Show (2026)")
+        no_exists = {1: {1: SimpleNamespace(season=1, episodes=[2, 3], total_episode=3, start_episode=1)}}
+        updates = []
+
+        class _SubscribeOper:
+            """收集订阅进度写入，不接触真实数据库。"""
+
+            def update(self, subscribe_id, payload):
+                updates.append((subscribe_id, payload))
+
+        chain = SubscribeChain()
+        chain.finish_subscribe_or_not = lambda **_kwargs: self.fail("refresh_subscribe_progress must not finish")
+        chain.resolve_subscribe_missing = MagicMock(return_value=(False, no_exists))
+
+        with patch.object(SUBSCRIBE_CHAIN_MODULE, "SubscribeOper", _SubscribeOper), patch.object(
+            SUBSCRIBE_CHAIN_MODULE.eventmanager, "send_event"
+        ) as send_event, patch.object(SUBSCRIBE_CHAIN_MODULE.eventmanager, "async_send_event") as async_send_event:
+            send_event.side_effect = AssertionError("refresh_subscribe_progress must not emit events")
+            async_send_event.side_effect = AssertionError("refresh_subscribe_progress must not emit events")
+            result = chain.refresh_subscribe_progress(subscribe=subscribe, meta=meta, mediainfo=mediainfo, scene="unit")
+
+        self.assertTrue(result["updated"])
+        self.assertEqual(result["fields"], ["lack_episode"])
+        self.assertEqual(result["lack_episode"], 2)
+        self.assertEqual(updates[0][1]["lack_episode"], 2)
+        send_event.assert_not_called()
+        async_send_event.assert_not_called()
+
+    def test_refresh_subscribe_progress_rejects_raw_no_exists_from_public_entry(self):
+        """公开刷新入口不接受外部缺集结果，避免绕过主程序解析口径。"""
+        subscribe = self._build_subscribe(best_version=0, total_episode=6, lack_episode=6, start_episode=4, note=[4])
+
+        with self.assertRaises(TypeError):
+            SubscribeChain().refresh_subscribe_progress(
+                subscribe=subscribe,
+                no_exists={},
+                scene="unit",
+            )
+
+    def test_refresh_subscribe_progress_from_resolved_missing_uses_supplied_no_exists_without_resolving_missing(self):
+        """下载链路已提供缺集结果时，内部刷新不重复解析媒体库缺口。"""
+        subscribe = self._build_subscribe(best_version=0, total_episode=6, lack_episode=6, start_episode=4, note=[4])
+        mediainfo = SimpleNamespace(type=MediaType.TV, seasons={1: [1, 2, 3, 4, 5, 6]}, title_year="Test Show (2026)")
+        no_exists = {1: {1: SimpleNamespace(season=1, episodes=[5, 6], total_episode=3, start_episode=4)}}
+        updates = []
+
+        class _SubscribeOper:
+            """收集订阅进度写入，不接触真实数据库。"""
+
+            def update(self, subscribe_id, payload):
+                updates.append((subscribe_id, payload))
+
+        chain = SubscribeChain()
+        chain.resolve_subscribe_missing = MagicMock(side_effect=AssertionError("supplied no_exists must be reused"))
+
+        with patch.object(SUBSCRIBE_CHAIN_MODULE, "SubscribeOper", _SubscribeOper):
+            result = chain._SubscribeChain__refresh_subscribe_progress_from_resolved_missing(
+                subscribe=subscribe,
+                resolved_no_exists=no_exists,
+                touch_last_update=False,
+                scene="download",
+            )
+
+        self.assertTrue(result["updated"])
+        self.assertEqual(result["lack_episode"], 2)
+        self.assertEqual(updates, [(subscribe.id, {"lack_episode": 2})])
+
+    def test_refresh_subscribe_progress_normal_without_no_exists_resolves_missing_before_compute(self):
+        """普通订阅无缺集结果时刷新入口负责先探测，不让纯计算方法接收 None。"""
+        subscribe = self._build_subscribe(best_version=0, total_episode=3, lack_episode=3)
+        meta = SimpleNamespace(type=MediaType.TV, begin_season=1, season=1)
+        mediainfo = SimpleNamespace(type=MediaType.TV, seasons={1: [1, 2, 3]}, title_year="Test Show (2026)")
+        no_exists = {1: {1: SimpleNamespace(season=1, episodes=[2], total_episode=3, start_episode=1)}}
+        updates = []
+
+        class _SubscribeOper:
+            """收集订阅进度写入，不接触真实数据库。"""
+
+            def update(self, subscribe_id, payload):
+                updates.append((subscribe_id, payload))
+
+        chain = SubscribeChain()
+        chain.resolve_subscribe_missing = MagicMock(return_value=(False, no_exists))
+
+        with patch.object(SUBSCRIBE_CHAIN_MODULE, "SubscribeOper", _SubscribeOper):
+            result = chain.refresh_subscribe_progress(
+                subscribe=subscribe,
+                meta=meta,
+                mediainfo=mediainfo,
+                scene="unit",
+            )
+
+        chain.resolve_subscribe_missing.assert_called_once()
+        self.assertEqual(result["lack_episode"], 1)
+        self.assertEqual(updates[0][1]["lack_episode"], 1)
+
+    def test_refresh_subscribe_progress_keeps_download_write_semantics_when_progress_unchanged(self):
+        """下载链路收敛后仍按旧口径写入 lack_episode，并按需刷新 last_update。"""
+        subscribe = self._build_subscribe(best_version=0, total_episode=3, lack_episode=2, note=[1])
+        mediainfo = SimpleNamespace(type=MediaType.TV, seasons={1: [1, 2, 3]}, title_year="Test Show (2026)")
+        no_exists = {1: {1: SimpleNamespace(season=1, episodes=[2, 3], total_episode=3, start_episode=1)}}
+        updates = []
+
+        class _SubscribeOper:
+            """收集订阅进度写入，不接触真实数据库。"""
+
+            def update(self, subscribe_id, payload):
+                updates.append((subscribe_id, payload))
+
+        with patch.object(SUBSCRIBE_CHAIN_MODULE, "SubscribeOper", _SubscribeOper):
+            result = SubscribeChain()._SubscribeChain__refresh_subscribe_progress_from_resolved_missing(
+                subscribe=subscribe,
+                resolved_no_exists=no_exists,
+                touch_last_update=True,
+                scene="download",
+            )
+
+        self.assertTrue(result["updated"])
+        self.assertEqual(result["lack_episode"], 2)
+        self.assertIn("last_update", updates[0][1])
+        self.assertEqual(updates[0][1]["lack_episode"], 2)
+
+    def test_refresh_subscribe_progress_wash_external_call_does_not_require_media_recognition(self):
+        """洗版进度可从订阅对象直接计算，外部同步不应被媒体识别失败阻断。"""
+        subscribe = self._build_subscribe(
+            best_version=1,
+            best_version_full=0,
+            total_episode=3,
+            lack_episode=3,
+            note=[1],
+            episode_priority={"2": 80},
+            current_priority=80,
+        )
+        updates = []
+
+        class _SubscribeOper:
+            """收集订阅进度写入，不接触真实数据库。"""
+
+            def update(self, subscribe_id, payload):
+                updates.append((subscribe_id, payload))
+
+        chain = SubscribeChain()
+        chain.recognize_media = MagicMock(side_effect=AssertionError("wash progress must not require recognition"))
+        chain.resolve_subscribe_missing = MagicMock(side_effect=AssertionError("wash progress must not resolve missing"))
+
+        with patch.object(SUBSCRIBE_CHAIN_MODULE, "SubscribeOper", _SubscribeOper):
+            result = chain.refresh_subscribe_progress(subscribe=subscribe, scene="reset_backfill")
+
+        self.assertTrue(result["updated"])
+        self.assertEqual(result["lack_episode"], 1)
+        self.assertEqual(updates[0][1]["lack_episode"], 1)
+
+    def test_refresh_subscribe_progress_wash_lack_counts_only_never_downloaded_targets(self):
+        """洗版 UI 缺集只统计从未下载过的目标集，priority>0 的集不算缺失。"""
+        subscribe = self._build_subscribe(
+            best_version=1,
+            best_version_full=0,
+            total_episode=3,
+            lack_episode=3,
+            note=[1],
+            episode_priority={"2": 80},
+            current_priority=80,
+        )
+        meta = SimpleNamespace(type=MediaType.TV, begin_season=1, season=1)
+        mediainfo = SimpleNamespace(type=MediaType.TV, seasons={1: [1, 2, 3]}, title_year="Test Show (2026)")
+        updates = []
+
+        class _SubscribeOper:
+            """收集订阅进度写入，不接触真实数据库。"""
+
+            def update(self, subscribe_id, payload):
+                updates.append((subscribe_id, payload))
+
+        with patch.object(SUBSCRIBE_CHAIN_MODULE, "SubscribeOper", _SubscribeOper), patch.object(
+            SUBSCRIBE_CHAIN_MODULE.eventmanager, "send_event"
+        ) as send_event, patch.object(SUBSCRIBE_CHAIN_MODULE.eventmanager, "async_send_event") as async_send_event:
+            send_event.side_effect = AssertionError("refresh_subscribe_progress must not emit events")
+            async_send_event.side_effect = AssertionError("refresh_subscribe_progress must not emit events")
+            result = SubscribeChain().refresh_subscribe_progress(
+                subscribe=subscribe, meta=meta, mediainfo=mediainfo, scene="unit"
+            )
+
+        self.assertEqual(result["lack_episode"], 1)
+        self.assertEqual(updates[0][1]["lack_episode"], 1)
+        send_event.assert_not_called()
+        async_send_event.assert_not_called()
+
+    def test_refresh_subscribe_progress_noops_when_progress_is_unchanged_without_download_timestamp(self):
+        """外部同步没有进度变化且不要求刷新时间时，不制造无意义写入。"""
+        subscribe = self._build_subscribe(
+            best_version=1,
+            total_episode=3,
+            lack_episode=1,
+            note=[1],
+            episode_priority={"2": 80},
+            current_priority=80,
+            last_update="2026-06-01 00:00:00",
+        )
+        meta = SimpleNamespace(type=MediaType.TV, begin_season=1, season=1)
+        mediainfo = SimpleNamespace(type=MediaType.TV, seasons={1: [1, 2, 3]}, title_year="Test Show (2026)")
+        updates = []
+
+        class _SubscribeOper:
+            """收集订阅进度写入，不接触真实数据库。"""
+
+            def update(self, subscribe_id, payload):
+                updates.append((subscribe_id, payload))
+
+        with patch.object(SUBSCRIBE_CHAIN_MODULE, "SubscribeOper", _SubscribeOper):
+            result = SubscribeChain().refresh_subscribe_progress(
+                subscribe=subscribe, meta=meta, mediainfo=mediainfo, touch_last_update=False, scene="unit"
+            )
+
+        self.assertFalse(result["updated"])
+        self.assertEqual(result["fields"], [])
+        self.assertEqual(updates, [])
+        self.assertEqual(subscribe.last_update, "2026-06-01 00:00:00")
+
+    def test_refresh_subscribe_progress_recognizes_media_with_episode_group(self):
+        """未传 mediainfo 时通过订阅 episode_group 识别媒体，保持分组集数契约。"""
+        subscribe = self._build_subscribe(
+            best_version=0,
+            total_episode=3,
+            lack_episode=3,
+            episode_group="group-a",
+        )
+        recognized = SimpleNamespace(type=MediaType.TV, seasons={1: [1, 2, 3]}, title_year="Test Show (2026)")
+        chain = SubscribeChain()
+        chain.recognize_media = MagicMock(return_value=recognized)
+        chain.resolve_subscribe_missing = MagicMock(return_value=(False, {}))
+
+        with patch.object(SUBSCRIBE_CHAIN_MODULE, "SubscribeOper") as oper:
+            oper.return_value.update.return_value = None
+            result = chain.refresh_subscribe_progress(subscribe=subscribe, scene="unit")
+
+        chain.recognize_media.assert_called_once()
+        self.assertEqual(chain.recognize_media.call_args.kwargs["episode_group"], "group-a")
+        self.assertEqual(result["scene"], "unit")
+
+    def test_refresh_subscribe_progress_normal_start_episode_uses_library_missing_range(self):
+        """普通订阅刷新按媒体库缺集结果计算 start_episode 之后的缺失集。"""
+        subscribe = self._build_subscribe(
+            best_version=0,
+            total_episode=6,
+            lack_episode=6,
+            start_episode=4,
+            note=[4],
+        )
+        meta = SimpleNamespace(type=MediaType.TV, begin_season=1, season=1)
+        mediainfo = SimpleNamespace(type=MediaType.TV, seasons={1: [1, 2, 3, 4, 5, 6]}, title_year="Test Show (2026)")
+        no_exists = {1: {1: SimpleNamespace(season=1, episodes=[5, 6], total_episode=3, start_episode=4)}}
+        updates = []
+
+        class _SubscribeOper:
+            """收集订阅进度写入，不接触真实数据库。"""
+
+            def update(self, subscribe_id, payload):
+                updates.append((subscribe_id, payload))
+
+        chain = SubscribeChain()
+        chain.resolve_subscribe_missing = MagicMock(return_value=(False, no_exists))
+        with patch.object(SUBSCRIBE_CHAIN_MODULE, "SubscribeOper", _SubscribeOper):
+            result = chain.refresh_subscribe_progress(subscribe=subscribe, meta=meta, mediainfo=mediainfo, scene="unit")
+
+        self.assertEqual(result["lack_episode"], 2)
+        self.assertEqual(updates[0][1]["lack_episode"], 2)
+
+    def test_refresh_subscribe_progress_full_wash_uses_best_version_completion_without_searching_targets(self):
+        """全集洗版刷新复用洗版进度状态，不走普通订阅搜索缺口。"""
+        subscribe = self._build_subscribe(
+            best_version=1,
+            best_version_full=1,
+            total_episode=6,
+            lack_episode=6,
+            start_episode=4,
+            note=[4, 5],
+            episode_priority={"4": 100, "5": 80},
+            current_priority=80,
+        )
+        meta = SimpleNamespace(type=MediaType.TV, begin_season=1, season=1)
+        mediainfo = SimpleNamespace(type=MediaType.TV, seasons={1: [1, 2, 3, 4, 5, 6]}, title_year="Test Show (2026)")
+        updates = []
+
+        class _SubscribeOper:
+            """收集订阅进度写入，不接触真实数据库。"""
+
+            def update(self, subscribe_id, payload):
+                updates.append((subscribe_id, payload))
+
+        chain = SubscribeChain()
+        chain.resolve_subscribe_missing = MagicMock(side_effect=AssertionError("wash progress must not use search gap"))
+        with patch.object(SUBSCRIBE_CHAIN_MODULE, "SubscribeOper", _SubscribeOper):
+            result = chain.refresh_subscribe_progress(subscribe=subscribe, meta=meta, mediainfo=mediainfo, scene="unit")
+
+        self.assertEqual(result["lack_episode"], 1)
+        self.assertEqual(updates[0][1]["lack_episode"], 1)
+
     def test_follow_preserves_shared_special_season_zero(self):
         """follow 分享订阅携带 S0 时，标题规整不能把合法季号覆盖成未指定。"""
         added_calls = []
@@ -1432,7 +1850,7 @@ class SubscribeChainTest(TestCase):
         payload = subscribe_oper.update.call_args.args[1]
         self.assertEqual(payload["episode_priority"], {"1": 100, "2": 80, "3": 90, "4": 60})
         self.assertEqual(payload["current_priority"], 90)
-        # update_subscribe_priority 不再回写 lack_episode；lack 由下载链路末端的 __update_lack_episodes 维护
+        # update_subscribe_priority 不回写 lack_episode；lack 由流程尾部的 refresh_subscribe_progress 维护
         self.assertNotIn("lack_episode", payload)
         self.assertEqual(subscribe.episode_priority, {"1": 100, "2": 80, "3": 90, "4": 60})
         self.assertEqual(subscribe.current_priority, 90)
@@ -1578,6 +1996,38 @@ class SubscribeChainTest(TestCase):
 
         finish_mock.assert_called_once_with(subscribe=subscribe, meta=meta, mediainfo=mediainfo)
 
+    def test_refresh_total_episode_before_completion_wash_recomputes_lack_with_new_targets(self):
+        """完成前 total 增长时，洗版缺集按新增目标是否下载过任意版本重算。"""
+        subscribe = self._build_subscribe(
+            total_episode=3,
+            lack_episode=0,
+            episode_priority={"1": 100, "2": 100, "3": 100},
+            current_priority=100,
+        )
+        mediainfo = SimpleNamespace(
+            seasons={1: [1, 2, 3, 4, 5]},
+            title_year="Test Show (2026)",
+        )
+        updates = []
+
+        class _SubscribeOper:
+            """收集完成前 total 刷新写入。"""
+
+            def update(self, subscribe_id, payload):
+                updates.append((subscribe_id, payload))
+
+        with patch.object(SUBSCRIBE_CHAIN_MODULE, "SubscribeOper", _SubscribeOper):
+            SubscribeChain()._SubscribeChain__refresh_total_episode_before_completion(subscribe, mediainfo)
+
+        payload = updates[0][1]
+        self.assertEqual(payload["total_episode"], 5)
+        self.assertEqual(payload["episode_priority"], {"1": 100, "2": 100, "3": 100, "4": 0, "5": 0})
+        self.assertEqual(payload["lack_episode"], 2)
+        self.assertEqual(payload["current_priority"], 0)
+        self.assertEqual(subscribe.total_episode, 5)
+        self.assertEqual(subscribe.lack_episode, 2)
+        self.assertEqual(subscribe.current_priority, 0)
+
     def test_check_resets_current_priority_when_new_episodes_expand_target_range(self):
         subscribe = self._build_subscribe(
             total_episode=3,
@@ -1613,6 +2063,125 @@ class SubscribeChainTest(TestCase):
         self.assertEqual(subscribe.total_episode, 5)
         self.assertEqual(subscribe.lack_episode, 2)
         self.assertEqual(subscribe.current_priority, 0)
+
+    def test_check_total_growth_lack_ignores_current_priority_fallback(self):
+        """旧洗版订阅缺少分集状态时，total 增长不能把 current_priority 当成下载事实。"""
+        subscribe = self._build_subscribe(
+            total_episode=3,
+            episode_priority=None,
+            current_priority=80,
+            lack_episode=3,
+        )
+        chain = SubscribeChain()
+        chain.recognize_media = lambda **kwargs: SimpleNamespace(
+            seasons={1: [1, 2, 3, 4, 5]},
+            title="Test Show",
+            year="2026",
+            vote_average=9.5,
+            overview="overview",
+            imdb_id="tt1234567",
+            tvdb_id=99,
+            get_poster_image=lambda: "poster",
+            get_backdrop_image=lambda: "backdrop",
+        )
+
+        with patch.object(SUBSCRIBE_CHAIN_MODULE, "SubscribeOper") as subscribe_oper_cls:
+            subscribe_oper = subscribe_oper_cls.return_value
+            subscribe_oper.list.return_value = [subscribe]
+            subscribe_oper.update.return_value = None
+
+            chain.check()
+
+        payload = subscribe_oper.update.call_args.args[1]
+        self.assertEqual(payload["total_episode"], 5)
+        self.assertEqual(payload["lack_episode"], 5)
+        self.assertEqual(payload["current_priority"], 0)
+        self.assertEqual(payload["episode_priority"], {"4": 0, "5": 0})
+        self.assertEqual(subscribe.total_episode, 5)
+        self.assertEqual(subscribe.lack_episode, 5)
+        self.assertEqual(subscribe.current_priority, 0)
+
+    def test_check_wash_manual_total_recomputes_lack_without_tmdb_total_override(self):
+        """手动 total 的洗版订阅不改 total，但元数据刷新会按当前目标重算 lack。"""
+        subscribe = self._build_subscribe(
+            total_episode=5,
+            lack_episode=5,
+            manual_total_episode=1,
+            note=[1],
+            episode_priority={"2": 80, "3": 0, "4": 0, "5": 0},
+            current_priority=80,
+        )
+        chain = SubscribeChain()
+        chain.recognize_media = lambda **kwargs: SimpleNamespace(
+            seasons={1: [1, 2, 3, 4, 5, 6]},
+            title="Test Show",
+            year="2026",
+            vote_average=9.5,
+            overview="overview",
+            imdb_id="tt1234567",
+            tvdb_id=99,
+            get_poster_image=lambda: "poster",
+            get_backdrop_image=lambda: "backdrop",
+        )
+        updates = []
+
+        class _SubscribeOper:
+            """提供订阅列表并收集元数据刷新写入。"""
+
+            def list(self):
+                return [subscribe]
+
+            def update(self, subscribe_id, payload):
+                updates.append((subscribe_id, payload))
+
+        with patch.object(SUBSCRIBE_CHAIN_MODULE, "SubscribeOper", _SubscribeOper):
+            chain.check()
+
+        payload = updates[0][1]
+        self.assertEqual(payload["total_episode"], 5)
+        self.assertEqual(payload["lack_episode"], 3)
+        self.assertEqual(payload["current_priority"], 80)
+
+    def test_check_normal_total_growth_keeps_incremental_lack_without_progress_refresh(self):
+        """普通订阅 metadata 刷新只按 total 增量调整 lack，不额外探测媒体库缺口。"""
+        subscribe = self._build_subscribe(
+            best_version=0,
+            total_episode=3,
+            lack_episode=1,
+            manual_total_episode=0,
+        )
+        chain = SubscribeChain()
+        chain.recognize_media = lambda **kwargs: SimpleNamespace(
+            seasons={1: [1, 2, 3, 4, 5]},
+            title="Test Show",
+            year="2026",
+            vote_average=9.5,
+            overview="overview",
+            imdb_id="tt1234567",
+            tvdb_id=99,
+            get_poster_image=lambda: "poster",
+            get_backdrop_image=lambda: "backdrop",
+        )
+        chain.refresh_subscribe_progress = MagicMock(
+            side_effect=AssertionError("metadata check must not perform progress refresh for normal total growth")
+        )
+        updates = []
+
+        class _SubscribeOper:
+            """提供订阅列表并收集元数据刷新写入。"""
+
+            def list(self):
+                return [subscribe]
+
+            def update(self, subscribe_id, payload):
+                updates.append((subscribe_id, payload))
+
+        with patch.object(SUBSCRIBE_CHAIN_MODULE, "SubscribeOper", _SubscribeOper):
+            chain.check()
+
+        payload = updates[0][1]
+        self.assertEqual(payload["total_episode"], 5)
+        self.assertEqual(payload["lack_episode"], 3)
 
     def test_best_version_interested_episodes_excludes_same_priority(self):
         """同 pri_order 的候选不应再把已达到该优先级的集列为可升级集。

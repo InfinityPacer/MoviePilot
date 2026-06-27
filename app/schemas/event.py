@@ -25,6 +25,53 @@ class BaseEventData(BaseModel):
     pass
 
 
+class SubscribeModifiedEventData(BaseEventData):
+    """
+    SubscribeModified 广播事件数据。
+
+    事件对外保持历史 dict 形态；调用方通过 to_dict() 发送，方便旧插件继续按
+    event.event_data.get(...) 读取，同时把变更字段计算收敛在事件实体内。
+    """
+
+    subscribe_id: int = Field(..., description="订阅 ID")
+    old_subscribe_info: Dict[str, Any] = Field(default_factory=dict, description="修改前订阅快照")
+    subscribe_info: Dict[str, Any] = Field(default_factory=dict, description="修改后订阅快照")
+    scene: str = Field(..., description="修改场景")
+    fields: Optional[List[str]] = Field(default=None, description="真实变更字段")
+
+    @model_validator(mode="after")
+    def fill_changed_fields(self):
+        """未显式传入 fields 时，按前后快照计算真实变更字段。"""
+        if self.fields is None:
+            self.fields = self.changed_fields(self.old_subscribe_info, self.subscribe_info)
+        return self
+
+    @staticmethod
+    def changed_fields(old_info: Optional[Dict[str, Any]], new_info: Optional[Dict[str, Any]]) -> List[str]:
+        """
+        计算订阅修改事件快照中的真实变更字段。
+
+        缺失字段与显式 None 是不同状态，不能用 dict.get 默认值合并判断。
+        """
+        sentinel = object()
+        old = old_info or {}
+        new = new_info or {}
+        return sorted(
+            key for key in set(old) | set(new)
+            if old.get(key, sentinel) != new.get(key, sentinel)
+        )
+
+    def to_dict(self) -> Dict[str, Any]:
+        """输出 SubscribeModified 历史事件 payload 结构。"""
+        return {
+            "subscribe_id": self.subscribe_id,
+            "old_subscribe_info": self.old_subscribe_info,
+            "subscribe_info": self.subscribe_info,
+            "scene": self.scene,
+            "fields": self.fields or [],
+        }
+
+
 class ConfigChangeEventData(BaseEventData):
     """
     ConfigChange 事件的数据模型
