@@ -203,55 +203,6 @@ jobs:
           --group ${{ matrix.runtime-group }}
           --python ${{ matrix.python-version }}
 
-      - name: Diagnose Psycopg C runtime
-        if: matrix.profile == 'free-threaded'
-        shell: pwsh
-        run: |
-          @'
-          import importlib
-          import json
-          import os
-          import shutil
-          import subprocess
-          import sys
-          from pathlib import Path
-
-          result = {
-              "path_has_pgbin": os.environ.get("PGBIN", "") in os.environ.get("PATH", ""),
-              "libpq": shutil.which("libpq.dll"),
-          }
-          for module_name in ("psycopg", "psycopg_c", "psycopg_c._psycopg", "psycopg_c.pq"):
-              try:
-                  module = importlib.import_module(module_name)
-                  result[module_name] = {
-                      "file": getattr(module, "__file__", None),
-                      "impl": getattr(getattr(module, "pq", None), "__impl__", None),
-                  }
-              except Exception as error:
-                  result[module_name] = {
-                      "error": f"{type(error).__name__}: {error}",
-                  }
-          result["psycopg_c_extensions"] = sorted(
-              str(path)
-              for path in Path(sys.prefix, "Lib", "site-packages", "psycopg_c").glob("*.pyd")
-          )
-          forced_env = os.environ.copy()
-          forced_env["PSYCOPG_IMPL"] = "c"
-          forced = subprocess.run(
-              [sys.executable, "-c", "import psycopg; print(psycopg.pq.__impl__)"],
-              capture_output=True,
-              check=False,
-              env=forced_env,
-              text=True,
-          )
-          result["forced_c"] = {
-              "returncode": forced.returncode,
-              "stdout": forced.stdout.strip(),
-              "stderr": forced.stderr.strip(),
-          }
-          print(json.dumps(result, indent=2, sort_keys=True))
-          '@ | uv run --locked --no-sync python -
-
       - name: Verify runtime profile
         env:
           AUTO_UPDATE_RESOURCE: 'false'
@@ -270,11 +221,24 @@ jobs:
           --group ${{ matrix.runtime-group }}
           --check --python ${{ matrix.python-version }}
 
-  windows-native-update:
+  native-update:
     if: github.event_name == 'workflow_dispatch'
-    name: Windows loaded native dependency update
-    runs-on: windows-2025
+    name: Loaded native dependency update / ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            runner: ubuntu-24.04
+            artifact-suffix: linux-x64
+          - name: macOS ARM
+            runner: macos-15
+            artifact-suffix: macos-arm64
+          - name: Windows x64
+            runner: windows-2025
+            artifact-suffix: windows-x64
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -301,13 +265,13 @@ jobs:
           SUPERUSER_PASSWORD: moviepilot-ci-only
         run: >-
           uv run --locked --no-sync python
-          -m scripts.probe_windows_native_dependency_update
-          --output ${{ runner.temp }}/moviepilot-native-update.json
+          -m scripts.probe_native_dependency_update
+          --output ${{ runner.temp }}/moviepilot-native-update-${{ matrix.artifact-suffix }}.json
 
       - name: Upload native update evidence
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: windows-native-dependency-update
-          path: ${{ runner.temp }}/moviepilot-native-update.json
+          name: native-dependency-update-${{ matrix.artifact-suffix }}
+          path: ${{ runner.temp }}/moviepilot-native-update-${{ matrix.artifact-suffix }}.json
           if-no-files-found: error
