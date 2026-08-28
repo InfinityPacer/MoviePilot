@@ -27,6 +27,35 @@ def test_gil_status_tracks_current_interpreter_state(monkeypatch):
     assert environment.is_gil_enabled() is False
 
 
+def test_windows_dll_directory_registration_retains_handle(tmp_path, monkeypatch):
+    handle = object()
+    registered = []
+    monkeypatch.setattr(environment, "is_windows", lambda: True)
+    monkeypatch.setattr(
+        environment.os,
+        "add_dll_directory",
+        lambda path: registered.append(path) or handle,
+        raising=False,
+    )
+    monkeypatch.setattr(environment, "_windows_dll_directory_handles", [])
+
+    assert environment.register_windows_dll_directory(str(tmp_path)) is True
+    assert registered == [str(tmp_path)]
+    assert environment._windows_dll_directory_handles == [handle]
+
+
+def test_windows_dll_directory_registration_ignores_other_platforms(tmp_path, monkeypatch):
+    monkeypatch.setattr(environment, "is_windows", lambda: False)
+    monkeypatch.setattr(
+        environment.os,
+        "add_dll_directory",
+        lambda _path: pytest.fail("must not register a DLL directory"),
+        raising=False,
+    )
+
+    assert environment.register_windows_dll_directory(str(tmp_path)) is False
+
+
 def test_runtime_dependency_group_tracks_interpreter_abi(monkeypatch):
     monkeypatch.setattr(dependencies, "is_free_threaded_runtime", lambda: False)
     assert dependencies.runtime_dependency_group() == "runtime-standard"
