@@ -26,7 +26,7 @@ TARGET_VERSION = "2.0.0"
 INITIAL_BUILD = 100
 TARGET_BUILD = 200
 MANIFEST_KINDS = ("requirements", "pyproject")
-INSTALLERS = ("plugin-helper", "uv-cli", "pip")
+INSTALLERS = ("plugin-helper", "pip")
 SUCCESSFUL_ONLINE_CLASSIFICATIONS = (
     "restart_required_for_activation",
     "online_activation_succeeded",
@@ -252,23 +252,7 @@ async def _install_manifest(
         with manifest.open("rb") as file:
             requirements = tomllib.load(file)["project"]["dependencies"]
 
-    if installer == "uv-cli":
-        uv = shutil.which("uv")
-        if not uv:
-            raise RuntimeError("未找到 uv 可执行文件")
-        command = [
-            uv,
-            "pip",
-            "install",
-            "--python",
-            sys.executable,
-            "--no-index",
-            "--find-links",
-            str(wheelhouse),
-        ]
-        if force_reinstall:
-            command.extend(("--reinstall-package", PROBE_DISTRIBUTION))
-    elif installer == "pip":
+    if installer == "pip":
         command = [
             sys.executable,
             "-m",
@@ -281,9 +265,6 @@ async def _install_manifest(
         ]
         if force_reinstall:
             command.append("--force-reinstall")
-    else:
-        raise ValueError(f"不支持的安装器：{installer}")
-
     command.extend(requirements)
     result = await asyncio.to_thread(_run, command, check=False)
     message = "\n".join(

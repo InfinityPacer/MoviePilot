@@ -20,7 +20,6 @@ concurrency:
 
 jobs:
   architecture:
-    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     name: Architecture Contract Gate
     timeout-minutes: 10
@@ -87,7 +86,6 @@ jobs:
           scripts/startup/performance.py --check --repeat 3
 
   pytest:
-    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     name: Unit Tests (${{ matrix.shard }})
     timeout-minutes: 20
@@ -121,7 +119,6 @@ jobs:
         run: uv run --locked --no-sync python tests/run.py --shard "${{ matrix.shard }}"
 
   coverage:
-    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     name: Coverage Report
     timeout-minutes: 20
@@ -162,84 +159,3 @@ jobs:
 
       - name: Check coverage ratchet
         run: uv run --locked --no-sync python scripts/architecture/coverage_ratchet.py
-
-  native-update:
-    if: github.event_name == 'workflow_dispatch'
-    name: Loaded native dependency update / ${{ matrix.name }} / ${{ matrix.installer }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 20
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Windows 11 x64 emulated
-            runner: windows-11-arm
-            artifact-suffix: windows-11-x64-emulated-plugin-helper
-            python-version: cpython-3.14.7-windows-x86_64-none
-            installer: plugin-helper
-            full-project: true
-            temporary-lock: true
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v10.0.1
-        with:
-          python-version: ${{ matrix.python-version }}
-          enable-cache: true
-          cache-dependency-glob: |
-            pyproject.toml
-            uv.lock
-
-      - name: Adapt temporary Windows x64 lock
-        if: matrix.temporary-lock == true
-        shell: pwsh
-        run: |
-          foreach ($path in @('pyproject.toml', 'uv.lock')) {
-            $content = Get-Content $path -Raw
-            $content.Replace(
-              "platform_machine == 'AMD64'",
-              "platform_machine == 'x86_64'"
-            ) | Set-Content $path -Encoding utf8
-          }
-
-      - name: Install locked standard runtime
-        if: matrix.full-project == true
-        run: >-
-          uv sync --locked --inexact --no-default-groups
-          --group runtime-standard --python ${{ matrix.python-version }}
-          --python-platform x86_64-pc-windows-msvc
-
-      - name: Create isolated pip probe environment
-        if: matrix.installer == 'pip'
-        run: uv venv --seed --python ${{ matrix.python-version }} .probe-venv
-
-      - name: Probe loaded native dependency update
-        if: matrix.full-project == true
-        env:
-          AUTO_UPDATE_RESOURCE: 'false'
-          CONFIG_DIR: ${{ runner.temp }}/moviepilot-native-update-config
-          MOVIEPILOT_SAFE_MODE: 'true'
-          SUPERUSER_PASSWORD: moviepilot-ci-only
-        run: >-
-          uv run --locked --no-sync python
-          -m scripts.probe_native_dependency_update
-          --installer ${{ matrix.installer }}
-          --output ${{ runner.temp }}/moviepilot-native-update-${{ matrix.artifact-suffix }}.json
-
-      - name: Probe isolated pip update
-        if: matrix.installer == 'pip'
-        run: >-
-          uv run --no-project --python .probe-venv python
-          -m scripts.probe_native_dependency_update
-          --installer pip
-          --output ${{ runner.temp }}/moviepilot-native-update-${{ matrix.artifact-suffix }}.json
-
-      - name: Upload native update evidence
-        if: always()
-        uses: actions/upload-artifact@v7
-        with:
-          name: native-dependency-update-${{ matrix.artifact-suffix }}
-          path: ${{ runner.temp }}/moviepilot-native-update-${{ matrix.artifact-suffix }}.json
-          if-no-files-found: error
