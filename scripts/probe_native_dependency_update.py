@@ -13,6 +13,7 @@ import platform
 import shutil
 import subprocess
 import sys
+import sysconfig
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -434,8 +435,10 @@ def _orchestrate(output: Path) -> None:
         raise RuntimeError("未找到 uv 可执行文件")
     report: dict[str, Any] = {
         "schema_version": 1,
+        "machine": platform.machine(),
         "platform": platform.platform(),
         "python": platform.python_version(),
+        "python_platform": sysconfig.get_platform(),
         "results": [],
     }
     try:
