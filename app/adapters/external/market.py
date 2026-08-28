@@ -1,6 +1,4 @@
 import asyncio
-from collections import deque
-from dataclasses import dataclass
 import importlib
 import io
 import json
@@ -15,8 +13,11 @@ import time
 import traceback
 import uuid
 import zipfile
+from collections import deque
+from dataclasses import dataclass
+from importlib.metadata import distributions
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, Dict, List, Optional, Tuple, Set, Callable, Awaitable, Iterator, Sequence
+from typing import Any, Awaitable, Callable, Dict, Iterator, List, Optional, Sequence, Set, Tuple
 from urllib.parse import parse_qs, quote, unquote, urlparse, urlsplit
 
 import aiofiles
@@ -24,21 +25,13 @@ import aioshutil
 import httpx2
 from anyio import Path as AsyncPath
 from packaging.markers import default_environment
-from packaging.requirements import InvalidRequirement, Requirement
-from packaging.specifiers import SpecifierSet, InvalidSpecifier
-from packaging.utils import canonicalize_name
-from packaging.version import Version, InvalidVersion
-from importlib.metadata import distributions
+from packaging.requirements import Requirement
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.version import InvalidVersion, Version
 from requests import Response
 
-from app.runtime.cache import cached, is_fresh
-from app.foundation.environment import is_free_threaded_runtime
-from app.runtime.dependencies import (
-    iter_runtime_profile_requirement_strings,
-    iter_runtime_requirement_strings,
-    runtime_excluded_dependency_pairs,
-)
-from app.runtime.settings import get_runtime_setting
+from app.adapters.network.http import AsyncRequestUtils, RequestUtils
+from app.adapters.system.host import SystemUtils
 from app.adapters.system.package import (
     PackageInstallRequest,
     build_package_install_strategies,
@@ -50,19 +43,26 @@ from app.adapters.system.plugin.manifest import (
     load_dependency_file,
     load_dependency_manifest,
 )
-from app.runtime.log import logger
-from app.runtime.observability import observe_compat_facade
+from app.foundation.environment import is_free_threaded_runtime
+from app.foundation.singleton import WeakSingleton
+from app.foundation.url import UrlUtils
+from app.foundation.version import compare_version
+from app.runtime.cache import cached, is_fresh
+from app.runtime.dependencies import (
+    iter_runtime_profile_requirement_strings,
+    iter_runtime_requirement_strings,
+    runtime_dependency_health_errors,
+)
 from app.runtime.execution import (
     await_task_to_terminal,
+)
+from app.runtime.execution import (
     run_in_threadpool_to_completion as _await_thread_operation,
 )
+from app.runtime.log import logger
+from app.runtime.observability import observe_compat_facade
+from app.runtime.settings import get_runtime_setting
 from app.runtime.tasks import get_task_registry
-from app.adapters.network.http import RequestUtils, AsyncRequestUtils
-from app.foundation.singleton import WeakSingleton
-
-from app.foundation.version import compare_version
-from app.adapters.system.host import SystemUtils
-from app.foundation.url import UrlUtils
 from app.runtime.version import get_app_version
 
 # 插件市场只通过 runtime 读取端口消费组合根的最新配置。
@@ -1860,32 +1860,10 @@ class PluginHelper(metaclass=WeakSingleton):
         lines = {line.strip() for line in message.splitlines() if line.strip()}
         if check_name != "uv check":
             return lines
-
-        matches = list(re.finditer(
-            r"The package `(?P<package>[^`]+)` requires `(?P<requirement>[^`]+)`, "
-            r"but [^\r\n;]+",
+        return runtime_dependency_health_errors(
             message,
-        ))
-        if not matches:
-            return lines
-
-        excluded_pairs = runtime_excluded_dependency_pairs(
             Path(get_runtime_setting('ROOT_PATH')) / "pyproject.toml"
         )
-        package_errors = set()
-        for match in matches:
-            try:
-                dependency_name = Requirement(match.group("requirement")).name
-            except InvalidRequirement:
-                package_errors.add(match.group(0))
-                continue
-            pair = (
-                canonicalize_name(match.group("package")),
-                canonicalize_name(dependency_name),
-            )
-            if pair not in excluded_pairs:
-                package_errors.add(match.group(0))
-        return package_errors
 
     @staticmethod
     def __runtime_health_regression_message(

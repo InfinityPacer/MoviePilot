@@ -1692,8 +1692,12 @@ demo = { index = "private" }
         added_error = "The package `demo` requires `missing>=1`, but it's not installed"
 
         with patch(
-            "app.adapters.external.market.runtime_excluded_dependency_pairs",
-            return_value={("oss2", "crcmod")},
+            "app.adapters.external.market.runtime_dependency_health_errors",
+            side_effect=lambda message, _project_file: {
+                line
+                for line in message.splitlines()
+                if line and "`oss2`" not in line
+            },
         ):
             message = PluginHelper._PluginHelper__runtime_health_regression_message(
                 {"uv check": (False, existing_error)},
@@ -1709,8 +1713,8 @@ demo = { index = "private" }
 
         expected_error = "The package `oss2` requires `crcmod>=1.7`, but it's not installed"
         with patch(
-            "app.adapters.external.market.runtime_excluded_dependency_pairs",
-            return_value={("oss2", "crcmod")},
+            "app.adapters.external.market.runtime_dependency_health_errors",
+            return_value=set(),
         ):
             message = PluginHelper._PluginHelper__runtime_health_regression_message(
                 {},
@@ -1934,8 +1938,8 @@ demo = { index = "private" }
             ), patch(
                     "app.adapters.external.market.logger.warning",
             ) as warning_mock, patch(
-                    "app.adapters.external.market.runtime_excluded_dependency_pairs",
-                    return_value={("oss2", "crcmod")},
+                    "app.adapters.external.market.runtime_dependency_health_errors",
+                    return_value=set(),
             ), patch(
                     "app.adapters.external.market.SystemUtils.execute_with_subprocess_async",
                     new=AsyncMock(return_value=(True, "ok")),

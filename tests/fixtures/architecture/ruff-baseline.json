@@ -2,9 +2,6 @@
   "app/adapters/external/cookiecloud.py": {
     "I001": 1
   },
-  "app/adapters/external/market.py": {
-    "I001": 1
-  },
   "app/adapters/external/server.py": {
     "I001": 1
   },
@@ -782,9 +779,6 @@
     "I001": 1
   },
   "app/runtime/debounce.py": {
-    "I001": 1
-  },
-  "app/runtime/dependencies.py": {
     "I001": 1
   },
   "app/runtime/event/errors.py": {

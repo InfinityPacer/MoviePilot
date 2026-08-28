@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import tomllib
 from collections.abc import Iterable
 from pathlib import Path
@@ -11,9 +12,17 @@ from packaging.utils import canonicalize_name
 
 from app.foundation.environment import is_free_threaded_runtime
 
-
 RUNTIME_STANDARD_GROUP = "runtime-standard"
 RUNTIME_FREE_THREADED_GROUP = "runtime-free-threaded"
+_UV_MISSING_DEPENDENCY_PATTERN = re.compile(
+    r"The package `(?P<package>[^`]+)` requires `(?P<requirement>[^`]+)`, "
+    r"but [^\r\n;]+"
+)
+_UV_PIP_CHECK_SUMMARY_PATTERNS = (
+    re.compile(r"^Using Python .+ environment at: .+$"),
+    re.compile(r"^Checked \d+ packages? in .+$"),
+    re.compile(r"^Found \d+ incompatibilit(?:y|ies)$"),
+)
 
 
 def runtime_dependency_group() -> str:
@@ -81,6 +90,47 @@ def runtime_excluded_dependency_pairs(project_file: Path) -> set[tuple[str, str]
                 continue
             pairs.add((canonicalize_name(package_name), canonicalize_name(dependency_name)))
     return pairs
+
+
+def runtime_dependency_health_errors(
+        message: str,
+        project_file: Path,
+        *,
+        retain_unparsed: bool = False,
+) -> set[str]:
+    """提取 uv 健康检查中未被项目依赖策略排除的诊断项。"""
+    lines = {line.strip() for line in message.splitlines() if line.strip()}
+    matches_by_line = {
+        line: list(_UV_MISSING_DEPENDENCY_PATTERN.finditer(line))
+        for line in lines
+    }
+    if not retain_unparsed and not any(matches_by_line.values()):
+        return lines
+
+    excluded_pairs = runtime_excluded_dependency_pairs(project_file)
+    errors = set()
+    for line in lines:
+        matches = matches_by_line[line]
+        if not matches:
+            if retain_unparsed and not any(
+                    pattern.fullmatch(line)
+                    for pattern in _UV_PIP_CHECK_SUMMARY_PATTERNS
+            ):
+                errors.add(line)
+            continue
+        for match in matches:
+            try:
+                dependency_name = Requirement(match.group("requirement")).name
+            except InvalidRequirement:
+                errors.add(match.group(0))
+                continue
+            pair = (
+                canonicalize_name(match.group("package")),
+                canonicalize_name(dependency_name),
+            )
+            if pair not in excluded_pairs:
+                errors.add(match.group(0))
+    return errors
 
 
 if __name__ == "__main__":
