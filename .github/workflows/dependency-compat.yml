@@ -10,6 +10,7 @@ on:
       - 'app/doctor/dependencies.py'
       - 'app/foundation/environment.py'
       - 'app/runtime/dependencies.py'
+      - 'scripts/probe_windows_native_dependency_update.py'
       - 'scripts/verify_runtime_profile.py'
       - 'docker/Dockerfile'
       - 'docker/**'
@@ -23,6 +24,7 @@ on:
       - 'app/doctor/dependencies.py'
       - 'app/foundation/environment.py'
       - 'app/runtime/dependencies.py'
+      - 'scripts/probe_windows_native_dependency_update.py'
       - 'scripts/verify_runtime_profile.py'
       - 'docker/Dockerfile'
       - 'docker/**'
@@ -129,6 +131,47 @@ jobs:
           uv sync --locked --offline --inexact --no-default-groups
           --group ${{ matrix.runtime-group }}
           --check --python ${{ matrix.python-version }}
+
+  windows-native-update:
+    name: Windows loaded native dependency update
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          python-version: '3.14'
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Install locked standard runtime
+        run: >-
+          uv sync --locked --inexact --no-default-groups
+          --group runtime-standard --python 3.14
+
+      - name: Probe loaded native dependency update
+        env:
+          AUTO_UPDATE_RESOURCE: 'false'
+          CONFIG_DIR: ${{ runner.temp }}/moviepilot-native-update-config
+          MOVIEPILOT_SAFE_MODE: 'true'
+          SUPERUSER_PASSWORD: moviepilot-ci-only
+        run: >-
+          uv run --locked --no-sync python
+          -m scripts.probe_windows_native_dependency_update
+          --output ${{ runner.temp }}/moviepilot-native-update.json
+
+      - name: Upload native update evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-native-dependency-update
+          path: ${{ runner.temp }}/moviepilot-native-update.json
+          if-no-files-found: error
 
   docker-dependencies:
     name: Docker dependencies / ${{ matrix.platform }}
