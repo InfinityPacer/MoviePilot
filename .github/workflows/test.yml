@@ -195,7 +195,12 @@ jobs:
       - name: Expose PostgreSQL build tools
         if: matrix.profile == 'free-threaded'
         shell: pwsh
-        run: '"$env:PGBIN" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append'
+        run: |
+          $pgBin = & pg_config --bindir
+          if (-not $pgBin) {
+            throw 'pg_config did not return a PostgreSQL binary directory'
+          }
+          $pgBin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
 
       - name: Install locked runtime dependencies
         run: >-
