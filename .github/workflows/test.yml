@@ -20,6 +20,7 @@ concurrency:
 
 jobs:
   architecture:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     name: Architecture Contract Gate
     timeout-minutes: 10
@@ -86,6 +87,7 @@ jobs:
           scripts/startup/performance.py --check --repeat 3
 
   pytest:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     name: Unit Tests (${{ matrix.shard }})
     timeout-minutes: 20
@@ -119,6 +121,7 @@ jobs:
         run: uv run --locked --no-sync python tests/run.py --shard "${{ matrix.shard }}"
 
   coverage:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: ubuntu-latest
     name: Coverage Report
     timeout-minutes: 20
@@ -159,3 +162,138 @@ jobs:
 
       - name: Check coverage ratchet
         run: uv run --locked --no-sync python scripts/architecture/coverage_ratchet.py
+
+  windows-runtime:
+    if: github.event_name == 'workflow_dispatch'
+    name: Windows ${{ matrix.profile }} / Python ${{ matrix.python-version }}
+    runs-on: windows-2025
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: standard
+            python-version: '3.14'
+            runtime-group: runtime-standard
+          - profile: free-threaded
+            python-version: '3.14t'
+            runtime-group: runtime-free-threaded
+
+    steps:
+      - name: Checkout exact candidate
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 2
+
+      - name: Verify candidate payload
+        shell: pwsh
+        run: |
+          $parent = git rev-parse HEAD^
+          if ($parent -ne '206484a12b20845680209706fd299bcc5d0c98a6') {
+            throw "Unexpected production candidate: $parent"
+          }
+          git diff --exit-code HEAD^ HEAD -- . ':(exclude).github/workflows/test.yml'
+
+      - name: Set up uv and Python
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Expose PostgreSQL build tools
+        if: matrix.profile == 'free-threaded'
+        shell: pwsh
+        run: |
+          if (-not $env:PGBIN -or -not (Test-Path -LiteralPath $env:PGBIN -PathType Container)) {
+            throw 'Windows free-threaded profile requires a valid PGBIN directory'
+          }
+          "$env:PGBIN" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      - name: Install locked runtime profile
+        run: >-
+          uv sync --locked --inexact --no-default-groups
+          --group ${{ matrix.runtime-group }}
+          --python ${{ matrix.python-version }}
+
+      - name: Verify runtime profile and write evidence
+        shell: pwsh
+        env:
+          CONFIG_DIR: ${{ runner.temp }}/moviepilot-runtime-smoke
+          EXPECTED_PROFILE: ${{ matrix.profile }}
+          EVIDENCE_PATH: ${{ runner.temp }}/windows-${{ matrix.profile }}.json
+        run: |
+          @'
+          import importlib
+          import importlib.metadata
+          import json
+          import os
+          import platform
+          import subprocess
+          import sys
+          import sysconfig
+
+          expected_profile = os.environ["EXPECTED_PROFILE"]
+          free_threaded = expected_profile == "free-threaded"
+          assert platform.system() == "Windows", platform.system()
+          assert platform.machine() == "AMD64", platform.machine()
+          assert (sysconfig.get_config_var("Py_GIL_DISABLED") == 1) is free_threaded
+          assert sys._is_gil_enabled() is (not free_threaded)
+
+          importlib.import_module("docker")
+          if free_threaded:
+              try:
+                  importlib.metadata.version("pywin32")
+              except importlib.metadata.PackageNotFoundError:
+                  pass
+              else:
+                  raise AssertionError("free-threaded profile must not install pywin32")
+          else:
+              assert importlib.metadata.version("pywin32") == "312"
+              importlib.import_module("docker.transport.npipesocket")
+              importlib.import_module("win32file")
+              importlib.import_module("win32pipe")
+
+          from app.doctor import dependencies
+          dependencies.main(full=True)
+          psycopg_impl = None
+          if free_threaded:
+              psycopg = importlib.import_module("psycopg")
+              psycopg_impl = psycopg.pq.__impl__
+              assert psycopg_impl == "c", psycopg_impl
+              assert sys._is_gil_enabled() is False
+
+          evidence = {
+              "production_candidate_commit": "206484a12b20845680209706fd299bcc5d0c98a6",
+              "free_threaded": free_threaded,
+              "gil_enabled_after_imports": sys._is_gil_enabled(),
+              "machine": platform.machine(),
+              "profile": expected_profile,
+              "psycopg_impl": psycopg_impl,
+              "pywin32": None if free_threaded else importlib.metadata.version("pywin32"),
+              "python": platform.python_version(),
+              "system": platform.system(),
+              "uv": subprocess.check_output(["uv", "--version"], text=True).strip(),
+          }
+          with open(os.environ["EVIDENCE_PATH"], "w", encoding="utf-8") as file:
+              json.dump(evidence, file, ensure_ascii=True, indent=2, sort_keys=True)
+              file.write("\n")
+          print(json.dumps(evidence, ensure_ascii=True, indent=2, sort_keys=True))
+          '@ | uv run --locked --no-sync python -
+
+      - name: Verify locked project consistency
+        run: >-
+          uv sync --locked --offline --inexact --no-default-groups
+          --group ${{ matrix.runtime-group }}
+          --check --python ${{ matrix.python-version }}
+
+      - name: Upload validation evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-${{ matrix.profile }}-007b-evidence
+          path: ${{ runner.temp }}/windows-${{ matrix.profile }}.json
+          if-no-files-found: error
+          retention-days: 7
