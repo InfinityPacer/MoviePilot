@@ -1,4 +1,4 @@
-"""验证 Windows 已加载原生扩展的插件依赖在线升级行为。"""
+"""验证已加载原生扩展的插件依赖在线升级行为。"""
 
 from __future__ import annotations
 
@@ -238,7 +238,7 @@ def _loaded_phase(
         probe_root: Path,
         output: Path,
 ) -> None:
-    """保持 v1 .pyd 已加载时调用生产入口升级到 v2。"""
+    """保持 v1 原生扩展已加载时调用生产入口升级到 v2。"""
     module = importlib.import_module(PROBE_MODULE)
     module_path = Path(module.__file__).resolve()
     before = {
@@ -296,7 +296,7 @@ def _loaded_phase_error(
 
 
 def _write_report(output: Path, report: dict[str, Any]) -> None:
-    """增量写入 Windows 探针报告，避免失败证据随临时目录丢失。"""
+    """增量写入探针报告，避免失败证据随临时目录丢失。"""
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(
         json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
@@ -305,7 +305,7 @@ def _write_report(output: Path, report: dict[str, Any]) -> None:
 
 
 def _build_wheels(root: Path, uv: str) -> Path:
-    """用当前 Python 构建同模块路径的 v1/v2 Windows wheel。"""
+    """用当前 Python 构建同模块路径的 v1/v2 原生 wheel。"""
     wheelhouse = root / "wheels"
     wheelhouse.mkdir()
     for distribution_version, compiled_version in (
@@ -374,7 +374,7 @@ def _run_manifest_scenario(
     loaded_result = _run([
         sys.executable,
         "-m",
-        "scripts.probe_windows_native_dependency_update",
+        "scripts.probe_native_dependency_update",
         "--loaded-phase",
         "--manifest",
         str(target_manifest),
@@ -426,9 +426,9 @@ def _run_manifest_scenario(
 
 
 def _orchestrate(output: Path) -> None:
-    """在 Windows 临时目录中运行两种插件清单场景并保留 JSON 证据。"""
-    if platform.system() != "Windows":
-        raise RuntimeError("该探针必须在真实 Windows 环境运行")
+    """在临时目录中运行两种插件清单场景并保留 JSON 证据。"""
+    if platform.system() not in {"Linux", "Darwin", "Windows"}:
+        raise RuntimeError(f"不支持的运行平台：{platform.system()}")
     uv = shutil.which("uv")
     if not uv:
         raise RuntimeError("未找到 uv 可执行文件")
@@ -474,7 +474,7 @@ def _orchestrate(output: Path) -> None:
         if not result["scenario_complete"]
     ]
     if incomplete:
-        raise RuntimeError(f"Windows 原生依赖更新探针未完整执行：{', '.join(incomplete)}")
+        raise RuntimeError(f"原生依赖更新探针未完整执行：{', '.join(incomplete)}")
 
 
 def main() -> None:

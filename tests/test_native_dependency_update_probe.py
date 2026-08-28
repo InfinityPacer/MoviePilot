@@ -1,8 +1,8 @@
-"""Windows 已加载原生依赖更新探针的纯逻辑测试。"""
+"""已加载原生依赖更新探针的纯逻辑测试。"""
 
 import pytest
 
-from scripts.probe_windows_native_dependency_update import (
+from scripts.probe_native_dependency_update import (
     TARGET_BUILD,
     _write_manifest,
     classify_online_attempt,

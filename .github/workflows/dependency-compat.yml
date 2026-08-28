@@ -10,7 +10,7 @@ on:
       - 'app/doctor/dependencies.py'
       - 'app/foundation/environment.py'
       - 'app/runtime/dependencies.py'
-      - 'scripts/probe_windows_native_dependency_update.py'
+      - 'scripts/probe_native_dependency_update.py'
       - 'scripts/verify_runtime_profile.py'
       - 'docker/Dockerfile'
       - 'docker/**'
@@ -24,7 +24,7 @@ on:
       - 'app/doctor/dependencies.py'
       - 'app/foundation/environment.py'
       - 'app/runtime/dependencies.py'
-      - 'scripts/probe_windows_native_dependency_update.py'
+      - 'scripts/probe_native_dependency_update.py'
       - 'scripts/verify_runtime_profile.py'
       - 'docker/Dockerfile'
       - 'docker/**'
@@ -132,10 +132,23 @@ jobs:
           --group ${{ matrix.runtime-group }}
           --check --python ${{ matrix.python-version }}
 
-  windows-native-update:
-    name: Windows loaded native dependency update
-    runs-on: windows-2025
+  native-update:
+    name: Loaded native dependency update / ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x64
+            runner: ubuntu-24.04
+            artifact-suffix: linux-x64
+          - name: macOS ARM
+            runner: macos-15
+            artifact-suffix: macos-arm64
+          - name: Windows x64
+            runner: windows-2025
+            artifact-suffix: windows-x64
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -162,15 +175,15 @@ jobs:
           SUPERUSER_PASSWORD: moviepilot-ci-only
         run: >-
           uv run --locked --no-sync python
-          -m scripts.probe_windows_native_dependency_update
-          --output ${{ runner.temp }}/moviepilot-native-update.json
+          -m scripts.probe_native_dependency_update
+          --output ${{ runner.temp }}/moviepilot-native-update-${{ matrix.artifact-suffix }}.json
 
       - name: Upload native update evidence
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: windows-native-dependency-update
-          path: ${{ runner.temp }}/moviepilot-native-update.json
+          name: native-dependency-update-${{ matrix.artifact-suffix }}
+          path: ${{ runner.temp }}/moviepilot-native-update-${{ matrix.artifact-suffix }}.json
           if-no-files-found: error
 
   docker-dependencies:
