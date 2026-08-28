@@ -203,6 +203,34 @@ jobs:
           --group ${{ matrix.runtime-group }}
           --python ${{ matrix.python-version }}
 
+      - name: Diagnose Psycopg C runtime
+        if: matrix.profile == 'free-threaded'
+        shell: pwsh
+        run: |
+          @'
+          import importlib
+          import json
+          import os
+          import shutil
+
+          result = {
+              "path_has_pgbin": os.environ.get("PGBIN", "") in os.environ.get("PATH", ""),
+              "libpq": shutil.which("libpq.dll"),
+          }
+          for module_name in ("psycopg", "psycopg_c", "psycopg_c._psycopg"):
+              try:
+                  module = importlib.import_module(module_name)
+                  result[module_name] = {
+                      "file": getattr(module, "__file__", None),
+                      "impl": getattr(getattr(module, "pq", None), "__impl__", None),
+                  }
+              except Exception as error:
+                  result[module_name] = {
+                      "error": f"{type(error).__name__}: {error}",
+                  }
+          print(json.dumps(result, indent=2, sort_keys=True))
+          '@ | uv run --locked --no-sync python -
+
       - name: Verify runtime profile
         env:
           AUTO_UPDATE_RESOURCE: 'false'
