@@ -149,6 +149,9 @@ jobs:
           - name: Windows x64
             runner: windows-2025
             artifact-suffix: windows-x64
+          - name: Windows 11 ARM64
+            runner: windows-11-arm
+            artifact-suffix: windows-11-arm64
     steps:
       - name: Checkout code
         uses: actions/checkout@v7

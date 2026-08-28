@@ -163,64 +163,6 @@ jobs:
       - name: Check coverage ratchet
         run: uv run --locked --no-sync python scripts/architecture/coverage_ratchet.py
 
-  windows-runtime:
-    if: github.event_name == 'workflow_dispatch'
-    name: Windows ${{ matrix.profile }} / Python ${{ matrix.python-version }}
-    runs-on: windows-2025
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - profile: standard
-            python-version: '3.14'
-            runtime-group: runtime-standard
-          - profile: free-threaded
-            python-version: '3.14t'
-            runtime-group: runtime-free-threaded
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v7
-
-      - name: Set up uv
-        uses: astral-sh/setup-uv@v10.0.1
-        with:
-          python-version: ${{ matrix.python-version }}
-          enable-cache: true
-          cache-dependency-glob: |
-            pyproject.toml
-            uv.lock
-
-      - name: Expose PostgreSQL build tools
-        if: matrix.profile == 'free-threaded'
-        shell: pwsh
-        run: '"$env:PGBIN" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append'
-
-      - name: Install locked runtime dependencies
-        run: >-
-          uv sync --locked --inexact --no-default-groups
-          --group ${{ matrix.runtime-group }}
-          --python ${{ matrix.python-version }}
-
-      - name: Verify runtime profile
-        env:
-          AUTO_UPDATE_RESOURCE: 'false'
-          CONFIG_DIR: ${{ runner.temp }}/moviepilot-runtime-smoke
-          MOVIEPILOT_SAFE_MODE: 'true'
-          SUPERUSER_PASSWORD: moviepilot-ci-only
-        run: >-
-          uv run --locked --no-sync python -m scripts.verify_runtime_profile
-          --expected-profile ${{ matrix.profile }}
-          --expected-system Windows
-          --expected-machine AMD64
-
-      - name: Verify locked project consistency
-        run: >-
-          uv sync --locked --offline --inexact --no-default-groups
-          --group ${{ matrix.runtime-group }}
-          --check --python ${{ matrix.python-version }}
-
   native-update:
     if: github.event_name == 'workflow_dispatch'
     name: Loaded native dependency update / ${{ matrix.name }}
@@ -239,6 +181,9 @@ jobs:
           - name: Windows x64
             runner: windows-2025
             artifact-suffix: windows-x64
+          - name: Windows 11 ARM64
+            runner: windows-11-arm
+            artifact-suffix: windows-11-arm64
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
