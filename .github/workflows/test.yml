@@ -176,18 +176,22 @@ jobs:
             runner: ubuntu-24.04
             artifact-suffix: linux-x64
             python-version: '3.14'
+            python-platform: x86_64-unknown-linux-gnu
           - name: macOS ARM
             runner: macos-15
             artifact-suffix: macos-arm64
             python-version: '3.14'
+            python-platform: aarch64-apple-darwin
           - name: Windows x64
             runner: windows-2025
             artifact-suffix: windows-x64
             python-version: '3.14'
+            python-platform: x86_64-pc-windows-msvc
           - name: Windows 11 x64 emulated
             runner: windows-11-arm
             artifact-suffix: windows-11-x64-emulated
             python-version: cpython-3.14.7-windows-x86_64-none
+            python-platform: x86_64-pc-windows-msvc
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -205,6 +209,7 @@ jobs:
         run: >-
           uv sync --locked --inexact --no-default-groups
           --group runtime-standard --python ${{ matrix.python-version }}
+          --python-platform ${{ matrix.python-platform }}
 
       - name: Probe loaded native dependency update
         env:
