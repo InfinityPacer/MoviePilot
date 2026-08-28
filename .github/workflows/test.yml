@@ -209,6 +209,7 @@ jobs:
         run: >-
           uv sync --locked --inexact --no-default-groups
           --group runtime-standard --python ${{ matrix.python-version }}
+          --python-platform x86_64-pc-windows-msvc
 
       - name: Create isolated pip probe environment
         if: matrix.installer == 'pip'
