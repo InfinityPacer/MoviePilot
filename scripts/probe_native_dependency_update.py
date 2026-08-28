@@ -27,6 +27,15 @@ INITIAL_BUILD = 100
 TARGET_BUILD = 200
 MANIFEST_KINDS = ("requirements", "pyproject")
 INSTALLERS = ("plugin-helper", "uv-cli", "pip")
+SUCCESSFUL_ONLINE_CLASSIFICATIONS = (
+    "restart_required_for_activation",
+    "online_activation_succeeded",
+)
+
+
+def online_attempt_succeeded(attempt: dict[str, Any]) -> bool:
+    """判断在线阶段是否已把目标载荷完整写入环境。"""
+    return attempt.get("classification") in SUCCESSFUL_ONLINE_CLASSIFICATIONS
 
 
 def classify_online_attempt(attempt: dict[str, Any]) -> str:
@@ -498,6 +507,10 @@ def _run_manifest_scenario(
         and recovery_state.get("distribution_version") == TARGET_VERSION
         and recovery_state.get("compiled_version") == TARGET_BUILD
     )
+    online_attempt_complete = (
+        loaded_phase_error is None
+        and online_attempt_succeeded(attempt)
+    )
     return {
         "manifest_kind": kind,
         "initial": initial_state,
@@ -509,7 +522,7 @@ def _run_manifest_scenario(
             "install_message": _sanitize_message(recovery_message, root),
             "fresh_process": recovery_state,
         },
-        "scenario_complete": loaded_phase_error is None and recovery_complete,
+        "scenario_complete": online_attempt_complete and recovery_complete,
     }
 
 

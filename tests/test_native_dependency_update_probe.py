@@ -6,6 +6,7 @@ from scripts.probe_native_dependency_update import (
     TARGET_BUILD,
     _write_manifest,
     classify_online_attempt,
+    online_attempt_succeeded,
 )
 
 
@@ -67,6 +68,26 @@ def test_classify_online_attempt_distinguishes_restart_boundaries():
     assert classify_online_attempt(
         _attempt(success=True, fresh=TARGET_BUILD, loaded=TARGET_BUILD)
     ) == "online_activation_succeeded"
+
+
+
+@pytest.mark.parametrize(
+    ("classification", "expected"),
+    [
+        ("restart_required_for_activation", True),
+        ("online_activation_succeeded", True),
+        ("install_blocked_unchanged", False),
+        ("install_failed_with_environment_change", False),
+        ("reported_success_without_new_payload", False),
+        ("probe_error", False),
+    ],
+)
+def test_online_attempt_succeeded_requires_target_payload(
+        classification: str,
+        expected: bool,
+):
+    """恢复成功不能掩盖在线阶段未写入目标载荷。"""
+    assert online_attempt_succeeded({"classification": classification}) is expected
 
 
 def test_classify_online_attempt_preserves_probe_failures():
