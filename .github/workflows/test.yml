@@ -192,22 +192,17 @@ jobs:
             pyproject.toml
             uv.lock
 
-      - name: Generate temporary Windows x64 lock
+      - name: Adapt temporary Windows x64 lock
         if: matrix.temporary-lock == true
         shell: pwsh
         run: |
-          $content = Get-Content pyproject.toml -Raw
-          $content = $content.Replace(
-            "platform_machine == 'AMD64'",
-            "platform_machine == 'x86_64'"
-          )
-          $content = [regex]::Replace(
-            $content,
-            '(?m)^\s*"pywin32==312 ; sys_platform == ''win32''",\r?\n',
-            ''
-          )
-          $content | Set-Content pyproject.toml -Encoding utf8
-          uv lock --python ${{ matrix.python-version }}
+          foreach ($path in @('pyproject.toml', 'uv.lock')) {
+            $content = Get-Content $path -Raw
+            $content.Replace(
+              "platform_machine == 'AMD64'",
+              "platform_machine == 'x86_64'"
+            ) | Set-Content $path -Encoding utf8
+          }
 
       - name: Install locked standard runtime
         if: matrix.full-project == true
