@@ -15,6 +15,7 @@ import subprocess
 import sys
 import sysconfig
 import tempfile
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,7 @@ TARGET_VERSION = "2.0.0"
 INITIAL_BUILD = 100
 TARGET_BUILD = 200
 MANIFEST_KINDS = ("requirements", "pyproject")
+INSTALLERS = ("plugin-helper", "uv-cli", "pip")
 
 
 def classify_online_attempt(attempt: dict[str, Any]) -> str:
@@ -104,7 +106,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "{PROBE_DISTRIBUTION}"
 version = "{distribution_version}"
-requires-python = ">=3.14"
+requires-python = ">=3.12"
 """.lstrip(),
         encoding="utf-8",
     )
@@ -172,7 +174,7 @@ def _write_manifest(
 [project]
 name = "moviepilot-native-update-consumer"
 version = "1.0.0"
-requires-python = ">=3.14"
+requires-python = ">=3.12"
 dependencies = ["{requirement}"]
 """.lstrip(),
             encoding="utf-8",
@@ -222,14 +224,65 @@ print(json.dumps(result, sort_keys=True))
 async def _install_manifest(
         manifest: Path,
         wheelhouse: Path,
+        *,
+        installer: str,
+        force_reinstall: bool = False,
 ) -> tuple[bool, str]:
-    """通过生产插件依赖入口安装指定清单。"""
-    from app.adapters.external.market import PluginHelper
+    """通过指定安装入口安装清单，生产模式保留 PluginHelper 完整调用链。"""
+    if installer == "plugin-helper":
+        from app.adapters.external.market import PluginHelper
 
-    return await PluginHelper().async_install_packages_with_fallback(
-        manifest,
-        [wheelhouse],
+        return await PluginHelper().async_install_packages_with_fallback(
+            manifest,
+            [wheelhouse],
+        )
+
+    if manifest.name == "requirements.txt":
+        requirements = ["-r", str(manifest)]
+    else:
+        with manifest.open("rb") as file:
+            requirements = tomllib.load(file)["project"]["dependencies"]
+
+    if installer == "uv-cli":
+        uv = shutil.which("uv")
+        if not uv:
+            raise RuntimeError("未找到 uv 可执行文件")
+        command = [
+            uv,
+            "pip",
+            "install",
+            "--python",
+            sys.executable,
+            "--no-index",
+            "--find-links",
+            str(wheelhouse),
+        ]
+        if force_reinstall:
+            command.extend(("--reinstall-package", PROBE_DISTRIBUTION))
+    elif installer == "pip":
+        command = [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--disable-pip-version-check",
+            "--no-index",
+            "--find-links",
+            str(wheelhouse),
+        ]
+        if force_reinstall:
+            command.append("--force-reinstall")
+    else:
+        raise ValueError(f"不支持的安装器：{installer}")
+
+    command.extend(requirements)
+    result = await asyncio.to_thread(_run, command, check=False)
+    message = "\n".join(
+        output.strip()
+        for output in (result.stdout, result.stderr)
+        if output.strip()
     )
+    return result.returncode == 0, message
 
 
 def _loaded_phase(
@@ -238,6 +291,7 @@ def _loaded_phase(
         wheelhouse: Path,
         probe_root: Path,
         output: Path,
+        installer: str,
 ) -> None:
     """保持 v1 原生扩展已加载时调用生产入口升级到 v2。"""
     module = importlib.import_module(PROBE_MODULE)
@@ -254,7 +308,11 @@ def _loaded_phase(
     }
     try:
         install_success, install_message = asyncio.run(
-            _install_manifest(manifest, wheelhouse)
+            _install_manifest(
+                manifest,
+                wheelhouse,
+                installer=installer,
+            )
         )
         attempt.update({
             "install_success": install_success,
@@ -331,12 +389,27 @@ def _build_wheels(root: Path, uv: str) -> Path:
     return wheelhouse
 
 
-def _uninstall_probe(uv: str) -> None:
+def _uninstall_probe(uv: str, *, installer: str) -> None:
     """在下一个清单场景前移除已退出进程使用的探针包。"""
-    result = _run(
-        [uv, "pip", "uninstall", "--python", sys.executable, PROBE_DISTRIBUTION],
-        check=False,
-    )
+    if installer == "pip":
+        command = [
+            sys.executable,
+            "-m",
+            "pip",
+            "uninstall",
+            "--yes",
+            PROBE_DISTRIBUTION,
+        ]
+    else:
+        command = [
+            uv,
+            "pip",
+            "uninstall",
+            "--python",
+            sys.executable,
+            PROBE_DISTRIBUTION,
+        ]
+    result = _run(command, check=False)
     remaining = _fresh_process_state()
     if "error" not in remaining:
         details = result.stderr.strip() or result.stdout.strip() or "没有输出"
@@ -348,6 +421,7 @@ def _run_manifest_scenario(
         kind: str,
         root: Path,
         wheelhouse: Path,
+        installer: str,
 ) -> dict[str, Any]:
     """执行安装 v1、在线升级 v2、退出加载进程后恢复三阶段。"""
     initial_manifest = _write_manifest(
@@ -361,7 +435,11 @@ def _run_manifest_scenario(
         distribution_version=TARGET_VERSION,
     )
     initial_success, initial_message = asyncio.run(
-        _install_manifest(initial_manifest, wheelhouse)
+        _install_manifest(
+            initial_manifest,
+            wheelhouse,
+            installer=installer,
+        )
     )
     if not initial_success:
         raise RuntimeError(f"{kind} v1 安装失败：{initial_message}")
@@ -372,7 +450,8 @@ def _run_manifest_scenario(
     attempt_path = root / f"{kind}-online-attempt.json"
     child_env = os.environ.copy()
     child_env["UV_NO_INDEX"] = "1"
-    loaded_result = _run([
+    child_env["PIP_NO_INDEX"] = "1"
+    loaded_command = [
         sys.executable,
         "-m",
         "scripts.probe_native_dependency_update",
@@ -385,7 +464,10 @@ def _run_manifest_scenario(
         str(root),
         "--output",
         str(attempt_path),
-    ], check=False, env=child_env)
+        "--installer",
+        installer,
+    ]
+    loaded_result = _run(loaded_command, check=False, env=child_env)
     if attempt_path.is_file():
         attempt = json.loads(attempt_path.read_text(encoding="utf-8"))
     else:
@@ -403,7 +485,12 @@ def _run_manifest_scenario(
     )
 
     recovery_success, recovery_message = asyncio.run(
-        _install_manifest(target_manifest, wheelhouse)
+        _install_manifest(
+            target_manifest,
+            wheelhouse,
+            installer=installer,
+            force_reinstall=True,
+        )
     )
     recovery_state = _fresh_process_state()
     recovery_complete = (
@@ -426,7 +513,29 @@ def _run_manifest_scenario(
     }
 
 
-def _orchestrate(output: Path) -> None:
+def _installer_version(installer: str, uv: str) -> str:
+    """记录执行安装的工具版本，区分历史 pip 与当前 uv 证据。"""
+    if installer == "pip":
+        command = [sys.executable, "-m", "pip", "--version"]
+    else:
+        command = [uv, "--version"]
+    result = _run(command)
+    return result.stdout.strip()
+
+
+def _wheel_evidence(wheelhouse: Path) -> list[dict[str, Any]]:
+    """记录输入 wheel 的名称、大小与摘要，保证跨平台结果可审计。"""
+    return [
+        {
+            "filename": wheel.name,
+            "size": wheel.stat().st_size,
+            "sha256": _sha256(wheel),
+        }
+        for wheel in sorted(wheelhouse.glob("*.whl"))
+    ]
+
+
+def _orchestrate(output: Path, *, installer: str) -> None:
     """在临时目录中运行两种插件清单场景并保留 JSON 证据。"""
     if platform.system() not in {"Linux", "Darwin", "Windows"}:
         raise RuntimeError(f"不支持的运行平台：{platform.system()}")
@@ -439,31 +548,41 @@ def _orchestrate(output: Path) -> None:
         "platform": platform.platform(),
         "python": platform.python_version(),
         "python_platform": sysconfig.get_platform(),
+        "installer": installer,
+        "installer_version": _installer_version(installer, uv),
         "results": [],
     }
     try:
         with tempfile.TemporaryDirectory(prefix="moviepilot-native-update-") as temp_dir:
             root = Path(temp_dir).resolve()
             wheelhouse = _build_wheels(root, uv)
+            report["wheels"] = _wheel_evidence(wheelhouse)
             previous_no_index = os.environ.get("UV_NO_INDEX")
+            previous_pip_no_index = os.environ.get("PIP_NO_INDEX")
             os.environ["UV_NO_INDEX"] = "1"
+            os.environ["PIP_NO_INDEX"] = "1"
             try:
                 for kind in MANIFEST_KINDS:
-                    _uninstall_probe(uv)
+                    _uninstall_probe(uv, installer=installer)
                     report["results"].append(
                         _run_manifest_scenario(
                             kind=kind,
                             root=root,
                             wheelhouse=wheelhouse,
+                            installer=installer,
                         )
                     )
                     _write_report(output, report)
-                _uninstall_probe(uv)
+                _uninstall_probe(uv, installer=installer)
             finally:
                 if previous_no_index is None:
                     os.environ.pop("UV_NO_INDEX", None)
                 else:
                     os.environ["UV_NO_INDEX"] = previous_no_index
+                if previous_pip_no_index is None:
+                    os.environ.pop("PIP_NO_INDEX", None)
+                else:
+                    os.environ["PIP_NO_INDEX"] = previous_pip_no_index
     except Exception as error:
         report["fatal_error"] = f"{type(error).__name__}: {error}"
         raise
@@ -488,6 +607,11 @@ def main() -> None:
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--wheelhouse", type=Path)
     parser.add_argument("--probe-root", type=Path)
+    parser.add_argument(
+        "--installer",
+        choices=INSTALLERS,
+        default="plugin-helper",
+    )
     arguments = parser.parse_args()
     if arguments.loaded_phase:
         if not all((arguments.manifest, arguments.wheelhouse, arguments.probe_root)):
@@ -497,9 +621,10 @@ def main() -> None:
             wheelhouse=arguments.wheelhouse,
             probe_root=arguments.probe_root,
             output=arguments.output,
+            installer=arguments.installer,
         )
         return
-    _orchestrate(arguments.output)
+    _orchestrate(arguments.output, installer=arguments.installer)
 
 
 if __name__ == "__main__":

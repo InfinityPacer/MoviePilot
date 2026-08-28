@@ -165,7 +165,7 @@ jobs:
 
   native-update:
     if: github.event_name == 'workflow_dispatch'
-    name: Loaded native dependency update / ${{ matrix.name }}
+    name: Loaded native dependency update / ${{ matrix.name }} / ${{ matrix.installer }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
     strategy:
@@ -174,24 +174,60 @@ jobs:
         include:
           - name: Linux x64
             runner: ubuntu-24.04
-            artifact-suffix: linux-x64
+            artifact-suffix: linux-x64-plugin-helper
             python-version: '3.14'
-            python-platform: x86_64-unknown-linux-gnu
+            installer: plugin-helper
+            full-project: true
+            temporary-lock: false
+          - name: Linux x64
+            runner: ubuntu-24.04
+            artifact-suffix: linux-x64-pip312
+            python-version: '3.12'
+            installer: pip
+            full-project: false
+            temporary-lock: false
           - name: macOS ARM
             runner: macos-15
-            artifact-suffix: macos-arm64
+            artifact-suffix: macos-arm64-plugin-helper
             python-version: '3.14'
-            python-platform: aarch64-apple-darwin
+            installer: plugin-helper
+            full-project: true
+            temporary-lock: false
+          - name: macOS ARM
+            runner: macos-15
+            artifact-suffix: macos-arm64-pip312
+            python-version: '3.12'
+            installer: pip
+            full-project: false
+            temporary-lock: false
           - name: Windows x64
             runner: windows-2025
-            artifact-suffix: windows-x64
+            artifact-suffix: windows-x64-plugin-helper
             python-version: '3.14'
-            python-platform: x86_64-pc-windows-msvc
+            installer: plugin-helper
+            full-project: true
+            temporary-lock: false
+          - name: Windows x64
+            runner: windows-2025
+            artifact-suffix: windows-x64-pip312
+            python-version: '3.12'
+            installer: pip
+            full-project: false
+            temporary-lock: false
           - name: Windows 11 x64 emulated
             runner: windows-11-arm
-            artifact-suffix: windows-11-x64-emulated
+            artifact-suffix: windows-11-x64-emulated-plugin-helper
             python-version: cpython-3.14.7-windows-x86_64-none
-            python-platform: x86_64-pc-windows-msvc
+            installer: plugin-helper
+            full-project: true
+            temporary-lock: true
+          - name: Windows 11 x64 emulated
+            runner: windows-11-arm
+            artifact-suffix: windows-11-x64-emulated-pip312
+            python-version: cpython-3.12-windows-x86_64-none
+            installer: pip
+            full-project: false
+            temporary-lock: false
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -205,13 +241,27 @@ jobs:
             pyproject.toml
             uv.lock
 
+      - name: Generate temporary Windows x64 lock
+        if: matrix.temporary-lock == true
+        shell: pwsh
+        run: |
+          $content = Get-Content pyproject.toml -Raw
+          $content.Replace("platform_machine == 'AMD64'", "platform_machine == 'x86_64'") |
+            Set-Content pyproject.toml -Encoding utf8
+          uv lock --python ${{ matrix.python-version }}
+
       - name: Install locked standard runtime
+        if: matrix.full-project == true
         run: >-
           uv sync --locked --inexact --no-default-groups
           --group runtime-standard --python ${{ matrix.python-version }}
-          --python-platform ${{ matrix.python-platform }}
+
+      - name: Create isolated pip probe environment
+        if: matrix.installer == 'pip'
+        run: uv venv --seed --python ${{ matrix.python-version }} .probe-venv
 
       - name: Probe loaded native dependency update
+        if: matrix.full-project == true
         env:
           AUTO_UPDATE_RESOURCE: 'false'
           CONFIG_DIR: ${{ runner.temp }}/moviepilot-native-update-config
@@ -220,6 +270,15 @@ jobs:
         run: >-
           uv run --locked --no-sync python
           -m scripts.probe_native_dependency_update
+          --installer ${{ matrix.installer }}
+          --output ${{ runner.temp }}/moviepilot-native-update-${{ matrix.artifact-suffix }}.json
+
+      - name: Probe isolated pip update
+        if: matrix.installer == 'pip'
+        run: >-
+          uv run --no-project --python .probe-venv python
+          -m scripts.probe_native_dependency_update
+          --installer pip
           --output ${{ runner.temp }}/moviepilot-native-update-${{ matrix.artifact-suffix }}.json
 
       - name: Upload native update evidence
