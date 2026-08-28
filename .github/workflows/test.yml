@@ -212,12 +212,15 @@ jobs:
           import json
           import os
           import shutil
+          import subprocess
+          import sys
+          from pathlib import Path
 
           result = {
               "path_has_pgbin": os.environ.get("PGBIN", "") in os.environ.get("PATH", ""),
               "libpq": shutil.which("libpq.dll"),
           }
-          for module_name in ("psycopg", "psycopg_c", "psycopg_c._psycopg"):
+          for module_name in ("psycopg", "psycopg_c", "psycopg_c._psycopg", "psycopg_c.pq"):
               try:
                   module = importlib.import_module(module_name)
                   result[module_name] = {
@@ -228,6 +231,24 @@ jobs:
                   result[module_name] = {
                       "error": f"{type(error).__name__}: {error}",
                   }
+          result["psycopg_c_extensions"] = sorted(
+              str(path)
+              for path in Path(sys.prefix, "Lib", "site-packages", "psycopg_c").glob("*.pyd")
+          )
+          forced_env = os.environ.copy()
+          forced_env["PSYCOPG_IMPL"] = "c"
+          forced = subprocess.run(
+              [sys.executable, "-c", "import psycopg; print(psycopg.pq.__impl__)"],
+              capture_output=True,
+              check=False,
+              env=forced_env,
+              text=True,
+          )
+          result["forced_c"] = {
+              "returncode": forced.returncode,
+              "stdout": forced.stdout.strip(),
+              "stderr": forced.stderr.strip(),
+          }
           print(json.dumps(result, indent=2, sort_keys=True))
           '@ | uv run --locked --no-sync python -
 
